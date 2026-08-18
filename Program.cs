@@ -265,13 +265,13 @@ namespace Ec20PhoneTool
             calls.WrapContents = true;
             calls.AutoScroll = false;
 
-            calls.Controls.Add(new Label { Text = "号码", AutoSize = true, Padding = new Padding(0, 8, 4, 0) });
-            numberBox = new TextBox { Width = 220 };
-            calls.Controls.Add(numberBox);
-            calls.Controls.Add(new Label { Text = "地区号码", AutoSize = true, Padding = new Padding(10, 8, 4, 0) });
+            calls.Controls.Add(new Label { Text = "地区号码", AutoSize = true, Padding = new Padding(0, 8, 4, 0) });
             areaCodeBox = new TextBox { Width = 80, Text = "+86" };
             areaCodeBox.Leave += delegate { SaveSettings(); };
             calls.Controls.Add(areaCodeBox);
+            calls.Controls.Add(new Label { Text = "号码", AutoSize = true, Padding = new Padding(10, 8, 4, 0) });
+            numberBox = new TextBox { Width = 220 };
+            calls.Controls.Add(numberBox);
 
             AddButton(calls, "拨号", delegate { Dial(); });
             AddButton(calls, "接听", delegate { AnswerCall(); });
@@ -1780,8 +1780,30 @@ namespace Ec20PhoneTool
                 if (callPopup != null) callPopup.SetNumber(clccNumber);
             }
 
+            string colpNumber = ExtractColpNumber(text);
+            if (!string.IsNullOrEmpty(colpNumber))
+            {
+                lastCallerNumber = colpNumber;
+                if (!string.IsNullOrEmpty(currentCallDirection) && currentCallNumber == "未知号码") currentCallNumber = colpNumber;
+                if (callPopup != null) callPopup.SetNumber(colpNumber);
+                if (string.Equals(currentCallDirection, "拨出", StringComparison.OrdinalIgnoreCase))
+                {
+                    MarkCallActive();
+                    if (callPopup != null) callPopup.SetActive();
+                }
+            }
+
             int clccState = ExtractClccState(text);
-            if (clccState == 0 && !string.IsNullOrEmpty(currentCallDirection))
+            if ((clccState == 4 || clccState == 5) && string.IsNullOrEmpty(currentCallDirection))
+            {
+                string number = !string.IsNullOrEmpty(clccNumber) ? clccNumber : (string.IsNullOrEmpty(lastCallerNumber) ? "未知号码" : lastCallerNumber);
+                lastCallerNumber = number;
+                StartCallHistory(number, "来电");
+                statusLabel.Text = "有来电。点击“接听”或“挂断”。";
+                ShowNotification("EC20 来电", "来电号码：" + number);
+                ShowCallPopup(number, true);
+            }
+            else if (clccState == 0 && !string.IsNullOrEmpty(currentCallDirection) && !string.Equals(currentCallDirection, "拨出", StringComparison.OrdinalIgnoreCase))
             {
                 MarkCallActive();
                 if (callPopup != null) callPopup.SetActive();
@@ -2017,6 +2039,12 @@ namespace Ec20PhoneTool
         private string ExtractClccNumber(string text)
         {
             var match = Regex.Match(text, @"\+CLCC:\s*\d+,\d+,\d+,\d+,\d+,""([^""]*)""");
+            return match.Success ? match.Groups[1].Value : "";
+        }
+
+        private string ExtractColpNumber(string text)
+        {
+            var match = Regex.Match(text ?? "", @"\+COLP:\s*""([^""]*)""");
             return match.Success ? match.Groups[1].Value : "";
         }
 
@@ -2330,7 +2358,11 @@ namespace Ec20PhoneTool
         public void SetIncoming(bool incoming)
         {
             titleLabel.Text = incoming ? "来电" : "正在拨号";
-            if (incoming) SetCallState(1, "呼叫中");
+            if (incoming)
+            {
+                answerButton.Enabled = true;
+                SetCallState(1, "呼叫中");
+            }
             else SetDialing();
         }
 
