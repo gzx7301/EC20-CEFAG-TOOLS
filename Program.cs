@@ -1180,7 +1180,6 @@ namespace Ec20PhoneTool
             SendCommandSilent("AT+CLVL=5");
             SendCommandSilent("AT+QCFG=\"ims\"");
             SendCommandSilent("AT+QCFG=\"volte_disable\"");
-            SendCommandSilent("AT+CIREG?");
             QueryStatus();
         }
 
@@ -1195,7 +1194,6 @@ namespace Ec20PhoneTool
             SendCommand("AT+QNWINFO");
             SendCommand("AT+QCFG=\"ims\"");
             SendCommand("AT+QCFG=\"volte_disable\"");
-            SendCommand("AT+CIREG?");
             SendCommand("AT+CPMS?");
             SendCommand("AT+CLCC");
         }
@@ -1209,7 +1207,8 @@ namespace Ec20PhoneTool
             SendCommandSilent("AT+CEREG?");
             SendCommandSilent("AT+COPS?");
             SendCommandSilent("AT+QNWINFO");
-            SendCommandSilent("AT+CIREG?");
+            SendCommandSilent("AT+QCFG=\"ims\"");
+            SendCommandSilent("AT+QCFG=\"volte_disable\"");
         }
 
         private void PollModemStatus()
@@ -1442,7 +1441,6 @@ namespace Ec20PhoneTool
             statusLabel.Text = "正在查询 VoLTE 状态。";
             SendCommand("AT+QCFG=\"ims\"");
             SendCommand("AT+QCFG=\"volte_disable\"");
-            SendCommand("AT+CIREG?");
         }
 
         private void SetVolteEnabled(bool enable)
@@ -1463,7 +1461,6 @@ namespace Ec20PhoneTool
             {
                 SendCommand("AT+QCFG=\"ims\",1");
                 SendCommand("AT+QCFG=\"volte_disable\",0");
-                SendCommand("AT+CIREG=2");
             }
             else
             {
@@ -1473,7 +1470,6 @@ namespace Ec20PhoneTool
 
             SendCommand("AT+QCFG=\"ims\"");
             SendCommand("AT+QCFG=\"volte_disable\"");
-            SendCommand("AT+CIREG?");
         }
 
         private void AnswerCall()
