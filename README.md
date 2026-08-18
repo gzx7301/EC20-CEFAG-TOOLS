@@ -7,6 +7,7 @@ EC20-CEFAG-TOOLS 是一个用于 Windows 的 Quectel EC20 CEFAG 电话 / 短信�
 ## 功能
 
 - 自动寻找 Quectel USB AT Port。
+- 优先识别真正的 `Quectel USB AT Port`，避免误选 NMEA / DM 端口。
 - 开机后台自启动，托盘常驻。
 - 单实例运行：重复打开 exe 时唤起已有界面。
 - 显示连接状态、搜网状态和信号强度。
@@ -17,7 +18,7 @@ EC20-CEFAG-TOOLS 是一个用于 Windows 的 Quectel EC20 CEFAG 电话 / 短信�
 - 支持拨号、接听、挂断。
 - 支持来电通知和来电弹窗。
 - 保存通话历史。
-- AT 信令页面可查看和保存日志。
+- AT 信令页面可查看日志、保存日志，并手动发送 AT 指令。
 
 ## 使用前准备
 

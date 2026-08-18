@@ -88,6 +88,7 @@ namespace Ec20PhoneTool
         private TextBox smsNumberBox;
         private TextBox smsBox;
         private TextBox logBox;
+        private TextBox atCommandBox;
         private TextBox smsDetailBox;
         private ListView smsListView;
         private ListView sentSmsListView;
@@ -346,10 +347,11 @@ namespace Ec20PhoneTool
             tabs.Controls.Add(atPage);
             var atRoot = new TableLayoutPanel();
             atRoot.Dock = DockStyle.Fill;
-            atRoot.RowCount = 2;
+            atRoot.RowCount = 3;
             atRoot.ColumnCount = 1;
             atRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             atRoot.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            atRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             atPage.Controls.Add(atRoot);
             var atTools = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
             atRoot.Controls.Add(atTools, 0, 0);
@@ -362,7 +364,25 @@ namespace Ec20PhoneTool
             logBox.Font = new Font("Consolas", 10f);
             atRoot.Controls.Add(logBox, 0, 1);
 
-            statusLabel = new Label { Text = "未连接。请选择 COM4，或点击刷新端口。", Dock = DockStyle.Fill };
+            var atSendPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
+            atSendPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            atSendPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+            atRoot.Controls.Add(atSendPanel, 0, 2);
+            atCommandBox = new TextBox { Dock = DockStyle.Fill };
+            atCommandBox.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    SendAtCommandFromBox();
+                }
+            };
+            atSendPanel.Controls.Add(atCommandBox, 0, 0);
+            var atSendButton = new Button { Text = "发送", Dock = DockStyle.Fill };
+            atSendButton.Click += delegate { SendAtCommandFromBox(); };
+            atSendPanel.Controls.Add(atSendButton, 1, 0);
+
+            statusLabel = new Label { Text = "未连接。请选择 EC20 AT 端口，或点击刷新端口。", Dock = DockStyle.Fill };
             root.Controls.Add(statusLabel, 0, 2);
 
             notifyIcon = new NotifyIcon();
@@ -469,36 +489,51 @@ namespace Ec20PhoneTool
         private void RefreshPorts()
         {
             var ports = GetPorts();
+            string previous = Convert.ToString(portBox.SelectedItem ?? portBox.Text);
 
             portBox.Items.Clear();
             foreach (var name in ports) portBox.Items.Add(name);
-            if (ports.Contains("COM4")) portBox.SelectedItem = "COM4";
+            if (!string.IsNullOrEmpty(previous) && ports.Contains(previous)) portBox.SelectedItem = previous;
             else if (portBox.Items.Count > 0) portBox.SelectedIndex = 0;
         }
 
         private List<string> GetPorts()
         {
             var ports = new List<string>();
+            var exactAtPorts = new List<string>();
+            var otherQuectelPorts = new List<string>();
             try
             {
-                using (var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_PnPEntity WHERE Name LIKE '%Quectel USB AT Port%'"))
+                using (var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_PnPEntity WHERE Name LIKE '%(COM%'"))
                 {
                     foreach (ManagementObject obj in searcher.Get())
                     {
                         string name = Convert.ToString(obj["Name"]);
+                        if (string.IsNullOrEmpty(name)) continue;
                         var match = Regex.Match(name ?? "", @"\(COM\d+\)");
-                        if (match.Success) ports.Add(match.Value.Trim('(', ')'));
+                        if (!match.Success) continue;
+                        string portName = match.Value.Trim('(', ')');
+                        if (name.IndexOf("Quectel USB AT Port", StringComparison.OrdinalIgnoreCase) >= 0) AddUnique(exactAtPorts, portName);
+                        else if (name.IndexOf("Quectel", StringComparison.OrdinalIgnoreCase) >= 0) AddUnique(otherQuectelPorts, portName);
                     }
                 }
             }
             catch { }
 
+            foreach (var name in exactAtPorts) AddUnique(ports, name);
+            foreach (var name in otherQuectelPorts) AddUnique(ports, name);
             foreach (var name in SerialPort.GetPortNames())
             {
-                if (!ports.Contains(name)) ports.Add(name);
+                AddUnique(ports, name);
             }
 
             return ports;
+        }
+
+        private void AddUnique(List<string> items, string value)
+        {
+            if (string.IsNullOrEmpty(value)) return;
+            if (!items.Contains(value)) items.Add(value);
         }
 
         private void ToggleConnection()
@@ -1041,22 +1076,8 @@ namespace Ec20PhoneTool
 
         private string FindPreferredAtPort()
         {
-            try
-            {
-                using (var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_PnPEntity WHERE Name LIKE '%Quectel USB AT Port%'"))
-                {
-                    foreach (ManagementObject obj in searcher.Get())
-                    {
-                        string name = Convert.ToString(obj["Name"]);
-                        var match = Regex.Match(name ?? "", @"\(COM\d+\)");
-                        if (match.Success) return match.Value.Trim('(', ')');
-                    }
-                }
-            }
-            catch { }
-
-            if (portBox.Items.Contains("COM4")) return "COM4";
-            return portBox.Items.Count > 0 ? Convert.ToString(portBox.Items[0]) : "";
+            var ports = GetPorts();
+            return ports.Count > 0 ? ports[0] : "";
         }
 
         private void RestartAutoConnect()
@@ -1308,6 +1329,15 @@ namespace Ec20PhoneTool
             }
             Log(">> " + command);
             port.Write(command + "\r");
+        }
+
+        private void SendAtCommandFromBox()
+        {
+            string command = atCommandBox == null ? "" : atCommandBox.Text.Trim();
+            if (command.Length == 0) return;
+            SendCommand(command);
+            atCommandBox.SelectAll();
+            atCommandBox.Focus();
         }
 
         private void AnswerCall()
