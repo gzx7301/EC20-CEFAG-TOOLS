@@ -136,6 +136,7 @@ namespace Ec20PhoneTool
         private bool currentCallActive;
         private bool waitingForDialResult;
         private DateTime dialAttemptStartedAt;
+        private DateTime commandQuietUntil;
         private const int MaxAutoConnectAttempts = 10;
         private const string StartupRunName = "EC20电话短信工具";
 
@@ -1260,6 +1261,8 @@ namespace Ec20PhoneTool
                     return;
                 }
 
+                if (DateTime.Now < commandQuietUntil) return;
+
                 SendCommandSilent("AT+CLCC");
                 statusPollTicks++;
                 if (statusPollTicks == 1 || statusPollTicks >= 5)
@@ -1394,14 +1397,25 @@ namespace Ec20PhoneTool
             }
             SaveSettings();
             lastCallerNumber = number;
-            waitingForDialResult = true;
-            dialAttemptStartedAt = DateTime.Now;
             StartCallHistory(number, "拨出");
             ShowCallPopup(number, false);
-            SendCommand("ATD" + number + ";");
+            statusLabel.Text = "正在清理旧通话状态后拨号。";
+            commandQuietUntil = DateTime.Now.AddMilliseconds(1800);
+            SendCommand("AT+CHUP");
+            SendCommand("ATH");
             ThreadPool.QueueUserWorkItem(delegate
             {
-                Thread.Sleep(1200);
+                Thread.Sleep(700);
+                BeginInvoke((Action)(delegate
+                {
+                    if (!IsConnected || string.IsNullOrEmpty(currentCallDirection)) return;
+                    waitingForDialResult = true;
+                    dialAttemptStartedAt = DateTime.Now;
+                    commandQuietUntil = DateTime.Now.AddMilliseconds(1800);
+                    SendCommand("ATD" + number + ";");
+                    statusLabel.Text = "正在拨号：" + number;
+                }));
+                Thread.Sleep(1400);
                 BeginInvoke((Action)(delegate
                 {
                     if (waitingForDialResult && IsConnected) SendCommand("AT+CLCC");
@@ -1553,8 +1567,10 @@ namespace Ec20PhoneTool
                 MessageBox.Show("请先连接 EC20 的 AT 端口。", "未连接");
                 return;
             }
-            Log(">> ATH");
-            port.Write("ATH\r");
+            waitingForDialResult = false;
+            commandQuietUntil = DateTime.Now.AddMilliseconds(1200);
+            SendCommand("AT+CHUP");
+            SendCommand("ATH");
             FinishCallHistory("已挂断");
             if (callPopup != null) callPopup.ClosePopup();
         }
