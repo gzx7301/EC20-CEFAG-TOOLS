@@ -88,6 +88,7 @@ namespace Ec20PhoneTool
         private Label volteStatusLabel;
         private CheckBox volteSwitch;
         private TextBox numberBox;
+        private TextBox areaCodeBox;
         private TextBox smsNumberBox;
         private TextBox smsBox;
         private TextBox logBox;
@@ -124,6 +125,7 @@ namespace Ec20PhoneTool
         private readonly string dataDir;
         private readonly string smsStorePath;
         private readonly string callStorePath;
+        private readonly string settingsPath;
         private readonly bool startHidden;
         private bool allowExit;
         private bool autoConnectFinished;
@@ -146,6 +148,7 @@ namespace Ec20PhoneTool
             dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EC20电话短信工具");
             smsStorePath = Path.Combine(dataDir, "短信记录.tsv");
             callStorePath = Path.Combine(dataDir, "通话记录.tsv");
+            settingsPath = Path.Combine(dataDir, "设置.ini");
             BuildUi();
             LoadLocalData();
             RefreshPorts();
@@ -263,8 +266,12 @@ namespace Ec20PhoneTool
             calls.AutoScroll = false;
 
             calls.Controls.Add(new Label { Text = "号码", AutoSize = true, Padding = new Padding(0, 8, 4, 0) });
-            numberBox = new TextBox { Width = 250 };
+            numberBox = new TextBox { Width = 220 };
             calls.Controls.Add(numberBox);
+            calls.Controls.Add(new Label { Text = "地区号码", AutoSize = true, Padding = new Padding(10, 8, 4, 0) });
+            areaCodeBox = new TextBox { Width = 80, Text = "+86" };
+            areaCodeBox.Leave += delegate { SaveSettings(); };
+            calls.Controls.Add(areaCodeBox);
 
             AddButton(calls, "拨号", delegate { Dial(); });
             AddButton(calls, "接听", delegate { AnswerCall(); });
@@ -499,9 +506,8 @@ namespace Ec20PhoneTool
                 volteSwitch.Checked = desiredOn;
                 updatingVolteSwitch = false;
                 volteSwitch.Text = desiredOn ? "VoLTE 开" : "VoLTE 关";
-                if (volteState == 1) volteSwitch.BackColor = Color.FromArgb(210, 245, 220);
-                else if (volteState == 2 || volteState == 3 || volteState == -1) volteSwitch.BackColor = Color.FromArgb(255, 240, 200);
-                else volteSwitch.BackColor = Color.FromArgb(245, 215, 215);
+                volteSwitch.ResetBackColor();
+                volteSwitch.UseVisualStyleBackColor = true;
             }
 
             if (volteDot != null) volteDot.Invalidate();
@@ -771,10 +777,35 @@ namespace Ec20PhoneTool
         private void LoadLocalData()
         {
             Directory.CreateDirectory(dataDir);
+            LoadSettings();
             LoadSmsRecords();
             LoadCallRecords();
             RefreshSmsList();
             RefreshCallList();
+        }
+
+        private void LoadSettings()
+        {
+            if (areaCodeBox == null || !File.Exists(settingsPath)) return;
+            foreach (string line in File.ReadAllLines(settingsPath, Encoding.UTF8))
+            {
+                int split = line.IndexOf('=');
+                if (split <= 0) continue;
+                string key = line.Substring(0, split).Trim();
+                string value = line.Substring(split + 1).Trim();
+                if (string.Equals(key, "AreaCode", StringComparison.OrdinalIgnoreCase))
+                {
+                    areaCodeBox.Text = NormalizeAreaCode(value);
+                }
+            }
+        }
+
+        private void SaveSettings()
+        {
+            if (areaCodeBox == null) return;
+            Directory.CreateDirectory(dataDir);
+            areaCodeBox.Text = NormalizeAreaCode(areaCodeBox.Text);
+            File.WriteAllText(settingsPath, "AreaCode=" + areaCodeBox.Text + Environment.NewLine, Encoding.UTF8);
         }
 
         private void LoadSmsRecords()
@@ -1348,16 +1379,34 @@ namespace Ec20PhoneTool
 
         private void Dial()
         {
-            string number = Regex.Replace(numberBox.Text, @"[^\d+*#]", "");
+            string number = BuildDialNumber(numberBox.Text);
             if (number.Length == 0)
             {
                 MessageBox.Show("请先输入电话号码。", "缺少号码");
                 return;
             }
+            SaveSettings();
             lastCallerNumber = number;
             StartCallHistory(number, "拨出");
             ShowCallPopup(number, false);
             SendCommand("ATD" + number + ";");
+        }
+
+        private string BuildDialNumber(string rawNumber)
+        {
+            string number = Regex.Replace(rawNumber ?? "", @"[^\d+*#]", "");
+            if (number.Length == 0) return "";
+            if (number.StartsWith("+") || number.StartsWith("*") || number.StartsWith("#")) return number;
+
+            string areaCode = NormalizeAreaCode(areaCodeBox == null ? "" : areaCodeBox.Text);
+            if (areaCode.Length == 0) return number;
+            return areaCode + number;
+        }
+
+        private string NormalizeAreaCode(string rawAreaCode)
+        {
+            string digits = Regex.Replace(rawAreaCode ?? "", @"\D", "");
+            return digits.Length == 0 ? "" : "+" + digits;
         }
 
         private void SendSms()
@@ -1731,6 +1780,17 @@ namespace Ec20PhoneTool
                 if (callPopup != null) callPopup.SetNumber(clccNumber);
             }
 
+            int clccState = ExtractClccState(text);
+            if (clccState == 0 && !string.IsNullOrEmpty(currentCallDirection))
+            {
+                MarkCallActive();
+                if (callPopup != null) callPopup.SetActive();
+            }
+            else if ((clccState == 2 || clccState == 3) && callPopup != null)
+            {
+                callPopup.SetDialing();
+            }
+
             if (text.Contains("RING"))
             {
                 string number = string.IsNullOrEmpty(lastCallerNumber) ? "未知号码" : lastCallerNumber;
@@ -1960,6 +2020,14 @@ namespace Ec20PhoneTool
             return match.Success ? match.Groups[1].Value : "";
         }
 
+        private int ExtractClccState(string text)
+        {
+            var match = Regex.Match(text ?? "", @"\+CLCC:\s*\d+,\d+,(\d+),");
+            if (!match.Success) return -1;
+            int state;
+            return int.TryParse(match.Groups[1].Value, out state) ? state : -1;
+        }
+
         private void ShowNotification(string title, string message)
         {
             if (notifyIcon == null) return;
@@ -2186,6 +2254,8 @@ namespace Ec20PhoneTool
         private readonly Action answerAction;
         private readonly Action hangUpAction;
         private readonly Label titleLabel;
+        private readonly Panel callStateDot;
+        private readonly Label callStateLabel;
         private readonly Label numberLabel;
         private readonly Label durationLabel;
         private readonly Button answerButton;
@@ -2193,6 +2263,7 @@ namespace Ec20PhoneTool
         private readonly System.Windows.Forms.Timer durationTimer;
         private DateTime callStartTime;
         private bool active;
+        private int callState;
 
         public CallPopupForm(Action answerAction, Action hangUpAction)
         {
@@ -2221,7 +2292,14 @@ namespace Ec20PhoneTool
 
             titleLabel = new Label { Text = "来电", Dock = DockStyle.Fill, Font = new Font(Font, FontStyle.Bold), AutoSize = false };
             root.Controls.Add(titleLabel, 0, 0);
-            root.SetColumnSpan(titleLabel, 2);
+
+            var statePanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            callStateDot = new Panel { Width = 16, Height = 16, Margin = new Padding(0, 8, 6, 0) };
+            callStateDot.Paint += delegate(object sender, PaintEventArgs e) { PaintCallStateDot(e.Graphics); };
+            statePanel.Controls.Add(callStateDot);
+            callStateLabel = new Label { Text = "未知", AutoSize = true, Padding = new Padding(0, 6, 0, 0) };
+            statePanel.Controls.Add(callStateLabel);
+            root.Controls.Add(statePanel, 1, 0);
 
             numberLabel = new Label { Text = "未知号码", Dock = DockStyle.Fill, AutoSize = false };
             root.Controls.Add(numberLabel, 0, 1);
@@ -2252,7 +2330,16 @@ namespace Ec20PhoneTool
         public void SetIncoming(bool incoming)
         {
             titleLabel.Text = incoming ? "来电" : "正在拨号";
-            if (!incoming) SetActive();
+            if (incoming) SetCallState(1, "呼叫中");
+            else SetDialing();
+        }
+
+        public void SetDialing()
+        {
+            if (active) return;
+            titleLabel.Text = "正在拨号";
+            answerButton.Enabled = false;
+            SetCallState(1, "呼叫中");
         }
 
         public void SetActive()
@@ -2265,6 +2352,7 @@ namespace Ec20PhoneTool
             }
             titleLabel.Text = "通话中";
             answerButton.Enabled = false;
+            SetCallState(2, "已接通");
             UpdateDuration();
         }
 
@@ -2273,6 +2361,27 @@ namespace Ec20PhoneTool
             durationTimer.Stop();
             active = false;
             Hide();
+        }
+
+        private void SetCallState(int state, string text)
+        {
+            callState = state;
+            callStateLabel.Text = text;
+            callStateDot.Invalidate();
+        }
+
+        private void PaintCallStateDot(Graphics graphics)
+        {
+            Color color = Color.FromArgb(150, 150, 150);
+            if (callState == 1) color = Color.FromArgb(230, 170, 35);
+            else if (callState == 2) color = Color.FromArgb(35, 170, 75);
+            using (var brush = new SolidBrush(color))
+            using (var pen = new Pen(Color.FromArgb(120, 120, 120)))
+            {
+                graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                graphics.FillEllipse(brush, 2, 2, 12, 12);
+                graphics.DrawEllipse(pen, 2, 2, 12, 12);
+            }
         }
 
         private void UpdateDuration()
