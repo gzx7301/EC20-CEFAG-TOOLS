@@ -86,7 +86,7 @@ namespace Ec20PhoneTool
         private Label signalLabel;
         private Panel volteDot;
         private Label volteStatusLabel;
-        private Button volteToggleButton;
+        private CheckBox volteSwitch;
         private TextBox numberBox;
         private TextBox smsNumberBox;
         private TextBox smsBox;
@@ -111,6 +111,10 @@ namespace Ec20PhoneTool
         private bool networkReady;
         private bool networkSearching;
         private int volteState = -1;
+        private int volteConfigState = -1;
+        private int volteDisableState = -1;
+        private int imsRegisteredState = -1;
+        private bool updatingVolteSwitch;
         private bool readingSms;
         private int noServiceTicks;
         private int recoveryStage;
@@ -245,13 +249,12 @@ namespace Ec20PhoneTool
             volteStatusLabel = new Label { Text = "VoLTE：未知", AutoSize = true, Padding = new Padding(0, 8, 4, 0) };
             topSecond.Controls.Add(volteStatusLabel);
 
-            var volteQueryButton = new Button { Text = "查询VoLTE", Width = 110, Height = 32 };
-            volteQueryButton.Click += delegate { QueryVolteStatus(); };
-            topSecond.Controls.Add(volteQueryButton);
-
-            volteToggleButton = new Button { Text = "开启VoLTE", Width = 110, Height = 32 };
-            volteToggleButton.Click += delegate { ToggleVolte(); };
-            topSecond.Controls.Add(volteToggleButton);
+            volteSwitch = new CheckBox { Text = "VoLTE开关", Width = 120, Height = 32, Appearance = Appearance.Button, TextAlign = ContentAlignment.MiddleCenter };
+            volteSwitch.CheckedChanged += delegate
+            {
+                if (!updatingVolteSwitch) SetVolteEnabled(volteSwitch.Checked);
+            };
+            topSecond.Controls.Add(volteSwitch);
 
             var calls = new FlowLayoutPanel();
             calls.Dock = DockStyle.Top;
@@ -466,7 +469,7 @@ namespace Ec20PhoneTool
         {
             Color color;
             if (volteState == 1) color = Color.FromArgb(35, 170, 75);
-            else if (volteState == -1 || volteState == 2) color = Color.FromArgb(230, 170, 30);
+            else if (volteState == -1 || volteState == 2 || volteState == 3) color = Color.FromArgb(230, 170, 30);
             else color = Color.FromArgb(210, 45, 45);
 
             using (var brush = new SolidBrush(color))
@@ -482,17 +485,23 @@ namespace Ec20PhoneTool
         {
             if (volteStatusLabel != null)
             {
-                if (volteState == 1) volteStatusLabel.Text = "VoLTE：已开启";
+                if (volteState == 1) volteStatusLabel.Text = "VoLTE：实际可用";
                 else if (volteState == 0) volteStatusLabel.Text = "VoLTE：已关闭";
                 else if (volteState == 2) volteStatusLabel.Text = "VoLTE：设置中";
+                else if (volteState == 3) volteStatusLabel.Text = "VoLTE：已开未注册";
                 else volteStatusLabel.Text = "VoLTE：未知";
             }
 
-            if (volteToggleButton != null)
+            if (volteSwitch != null)
             {
-                bool enabled = volteState == 1;
-                volteToggleButton.Text = enabled ? "关闭VoLTE" : "开启VoLTE";
-                volteToggleButton.BackColor = enabled ? Color.FromArgb(235, 255, 240) : SystemColors.Control;
+                bool desiredOn = volteState == 1 || volteState == 2 || volteState == 3 || volteConfigState == 1;
+                updatingVolteSwitch = true;
+                volteSwitch.Checked = desiredOn;
+                updatingVolteSwitch = false;
+                volteSwitch.Text = desiredOn ? "VoLTE 开" : "VoLTE 关";
+                if (volteState == 1) volteSwitch.BackColor = Color.FromArgb(210, 245, 220);
+                else if (volteState == 2 || volteState == 3 || volteState == -1) volteSwitch.BackColor = Color.FromArgb(255, 240, 200);
+                else volteSwitch.BackColor = Color.FromArgb(245, 215, 215);
             }
 
             if (volteDot != null) volteDot.Invalidate();
@@ -733,6 +742,9 @@ namespace Ec20PhoneTool
             networkReady = false;
             networkSearching = false;
             volteState = -1;
+            volteConfigState = -1;
+            volteDisableState = -1;
+            imsRegisteredState = -1;
             lastSignal = -1;
             readingSms = false;
             noServiceTicks = 0;
@@ -1023,10 +1035,17 @@ namespace Ec20PhoneTool
 
             noServiceTicks = 0;
             recoveryStage = 2;
+            networkReady = false;
             networkSearching = true;
-            statusLabel.Text = "正在恢复 EC20 电话/短信服务。";
-            UpdateConnectionIndicators(true, lastSignal);
-            Log("正在恢复 EC20 电话/短信服务。");
+            lastSignal = -1;
+            volteState = -1;
+            volteConfigState = -1;
+            volteDisableState = -1;
+            imsRegisteredState = -1;
+            statusLabel.Text = "正在重新搜网。";
+            UpdateConnectionIndicators(true, -1);
+            UpdateVolteIndicators();
+            Log("正在重新搜网。");
             SendCommandSilent("AT+CPIN?");
             SendCommandSilent("AT+QSIMDET=1,1");
             SendCommandSilent("AT+COPS=0");
@@ -1161,6 +1180,7 @@ namespace Ec20PhoneTool
             SendCommandSilent("AT+CLVL=5");
             SendCommandSilent("AT+QCFG=\"ims\"");
             SendCommandSilent("AT+QCFG=\"volte_disable\"");
+            SendCommandSilent("AT+CIREG?");
             QueryStatus();
         }
 
@@ -1175,6 +1195,7 @@ namespace Ec20PhoneTool
             SendCommand("AT+QNWINFO");
             SendCommand("AT+QCFG=\"ims\"");
             SendCommand("AT+QCFG=\"volte_disable\"");
+            SendCommand("AT+CIREG?");
             SendCommand("AT+CPMS?");
             SendCommand("AT+CLCC");
         }
@@ -1188,6 +1209,7 @@ namespace Ec20PhoneTool
             SendCommandSilent("AT+CEREG?");
             SendCommandSilent("AT+COPS?");
             SendCommandSilent("AT+QNWINFO");
+            SendCommandSilent("AT+CIREG?");
         }
 
         private void PollModemStatus()
@@ -1265,6 +1287,9 @@ namespace Ec20PhoneTool
             networkReady = false;
             networkSearching = false;
             volteState = -1;
+            volteConfigState = -1;
+            volteDisableState = -1;
+            imsRegisteredState = -1;
             lastSignal = -1;
             readingSms = false;
             noServiceTicks = 0;
@@ -1417,18 +1442,20 @@ namespace Ec20PhoneTool
             statusLabel.Text = "正在查询 VoLTE 状态。";
             SendCommand("AT+QCFG=\"ims\"");
             SendCommand("AT+QCFG=\"volte_disable\"");
+            SendCommand("AT+CIREG?");
         }
 
-        private void ToggleVolte()
+        private void SetVolteEnabled(bool enable)
         {
             if (!IsConnected)
             {
+                UpdateVolteIndicators();
                 MessageBox.Show("请先连接 EC20 的 AT 端口。", "未连接");
                 return;
             }
 
-            bool enable = volteState != 1;
             volteState = 2;
+            volteConfigState = enable ? 1 : 0;
             UpdateVolteIndicators();
             statusLabel.Text = enable ? "正在开启 VoLTE。" : "正在关闭 VoLTE。";
 
@@ -1436,6 +1463,7 @@ namespace Ec20PhoneTool
             {
                 SendCommand("AT+QCFG=\"ims\",1");
                 SendCommand("AT+QCFG=\"volte_disable\",0");
+                SendCommand("AT+CIREG=2");
             }
             else
             {
@@ -1445,6 +1473,7 @@ namespace Ec20PhoneTool
 
             SendCommand("AT+QCFG=\"ims\"");
             SendCommand("AT+QCFG=\"volte_disable\"");
+            SendCommand("AT+CIREG?");
         }
 
         private void AnswerCall()
@@ -1581,13 +1610,18 @@ namespace Ec20PhoneTool
             if (string.IsNullOrEmpty(text)) return;
 
             bool changed = false;
-            var ims = Regex.Match(text, @"\+QCFG:\s*""ims"",\s*(\d+)");
+            var ims = Regex.Match(text, @"\+QCFG:\s*""ims"",\s*(\d+)(?:,\s*(\d+))?");
             if (ims.Success)
             {
                 int value;
                 if (int.TryParse(ims.Groups[1].Value, out value))
                 {
-                    volteState = value > 0 ? 1 : 0;
+                    volteConfigState = value > 0 ? 1 : 0;
+                    if (ims.Groups[2].Success)
+                    {
+                        int registered;
+                        if (int.TryParse(ims.Groups[2].Value, out registered)) imsRegisteredState = registered > 0 ? 1 : 0;
+                    }
                     changed = true;
                 }
             }
@@ -1598,15 +1632,46 @@ namespace Ec20PhoneTool
                 int value;
                 if (int.TryParse(disabled.Groups[1].Value, out value))
                 {
-                    volteState = value == 0 ? 1 : 0;
+                    volteDisableState = value;
                     changed = true;
                 }
             }
 
+            foreach (Match cireg in Regex.Matches(text, @"\+CIREG:\s*(?:\d+,)?(\d+)"))
+            {
+                string value = cireg.Groups[1].Value;
+                if (value == "1" || value == "5") imsRegisteredState = 1;
+                else if (value == "0" || value == "2" || value == "3" || value == "4") imsRegisteredState = 0;
+                changed = true;
+            }
+
             if (changed)
             {
+                RecalculateVolteState();
                 UpdateVolteIndicators();
-                statusLabel.Text = volteState == 1 ? "VoLTE 已开启。" : "VoLTE 已关闭或当前固件未启用。";
+                if (volteState == 1) statusLabel.Text = "VoLTE 实际可用。";
+                else if (volteState == 3) statusLabel.Text = "VoLTE 配置已开启，但 IMS 尚未注册。";
+                else if (volteState == 0) statusLabel.Text = "VoLTE 已关闭或当前不可用。";
+            }
+        }
+
+        private void RecalculateVolteState()
+        {
+            if (volteConfigState == 0 || volteDisableState == 1)
+            {
+                volteState = 0;
+            }
+            else if (volteConfigState == 1 && volteDisableState == 0 && imsRegisteredState == 1)
+            {
+                volteState = 1;
+            }
+            else if (volteConfigState == 1 || volteDisableState == 0)
+            {
+                volteState = 3;
+            }
+            else
+            {
+                volteState = -1;
             }
         }
 
