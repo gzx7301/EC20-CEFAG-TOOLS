@@ -134,6 +134,8 @@ namespace Ec20PhoneTool
         private string currentCallDirection = "";
         private DateTime currentCallStartedAt;
         private bool currentCallActive;
+        private bool waitingForDialResult;
+        private DateTime dialAttemptStartedAt;
         private const int MaxAutoConnectAttempts = 10;
         private const string StartupRunName = "EC20电话短信工具";
 
@@ -1385,11 +1387,26 @@ namespace Ec20PhoneTool
                 MessageBox.Show("请先输入电话号码。", "缺少号码");
                 return;
             }
+            if (!IsServiceReady())
+            {
+                MessageBox.Show("当前 EC20 还没有进入可通话/短信的可用状态，请等状态变为可用后再拨号。", "当前不可拨号");
+                return;
+            }
             SaveSettings();
             lastCallerNumber = number;
+            waitingForDialResult = true;
+            dialAttemptStartedAt = DateTime.Now;
             StartCallHistory(number, "拨出");
             ShowCallPopup(number, false);
             SendCommand("ATD" + number + ";");
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Thread.Sleep(1200);
+                BeginInvoke((Action)(delegate
+                {
+                    if (waitingForDialResult && IsConnected) SendCommand("AT+CLCC");
+                }));
+            });
         }
 
         private string BuildDialNumber(string rawNumber)
@@ -1788,6 +1805,7 @@ namespace Ec20PhoneTool
                 if (callPopup != null) callPopup.SetNumber(colpNumber);
                 if (string.Equals(currentCallDirection, "拨出", StringComparison.OrdinalIgnoreCase))
                 {
+                    waitingForDialResult = false;
                     MarkCallActive();
                     if (callPopup != null) callPopup.SetActive();
                 }
@@ -1813,6 +1831,14 @@ namespace Ec20PhoneTool
                 callPopup.SetDialing();
             }
 
+            if (waitingForDialResult && ContainsAtError(text) && (DateTime.Now - dialAttemptStartedAt).TotalSeconds < 15)
+            {
+                waitingForDialResult = false;
+                statusLabel.Text = "拨号失败，EC20 返回 ERROR。请查看 AT 信令日志。";
+                FinishCallHistory("拨号失败");
+                if (callPopup != null) callPopup.SetFailed("拨号失败");
+            }
+
             if (text.Contains("RING"))
             {
                 string number = string.IsNullOrEmpty(lastCallerNumber) ? "未知号码" : lastCallerNumber;
@@ -1831,6 +1857,7 @@ namespace Ec20PhoneTool
 
             if (text.Contains("NO CARRIER") || text.Contains("BUSY") || text.Contains("NO ANSWER"))
             {
+                waitingForDialResult = false;
                 statusLabel.Text = "通话已结束。";
                 if (text.Contains("BUSY")) FinishCallHistory("对方忙");
                 else if (text.Contains("NO ANSWER")) FinishCallHistory("未接听");
@@ -2361,7 +2388,7 @@ namespace Ec20PhoneTool
             if (incoming)
             {
                 answerButton.Enabled = true;
-                SetCallState(1, "呼叫中");
+                SetCallState(1, "等待接听");
             }
             else SetDialing();
         }
@@ -2386,6 +2413,15 @@ namespace Ec20PhoneTool
             answerButton.Enabled = false;
             SetCallState(2, "已接通");
             UpdateDuration();
+        }
+
+        public void SetFailed(string text)
+        {
+            durationTimer.Stop();
+            active = false;
+            titleLabel.Text = text;
+            answerButton.Enabled = false;
+            SetCallState(0, text);
         }
 
         public void ClosePopup()
