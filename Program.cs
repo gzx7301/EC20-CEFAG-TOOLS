@@ -81,6 +81,7 @@ namespace Ec20PhoneTool
         private Button refreshButton;
         private Button connectButton;
         private Button startupButton;
+        private Button settingsButton;
         private Panel connectionDot;
         private Label connectionTextLabel;
         private Label signalLabel;
@@ -116,6 +117,7 @@ namespace Ec20PhoneTool
         private int volteConfigState = -1;
         private int volteDisableState = -1;
         private int imsRegisteredState = -1;
+        private string currentMbn = "未知";
         private bool updatingVolteSwitch;
         private bool readingSms;
         private int noServiceTicks;
@@ -140,6 +142,8 @@ namespace Ec20PhoneTool
         private DateTime commandQuietUntil;
         private volatile bool directSerialReadActive;
         private bool suppressSmsAutoSave;
+        private readonly HashSet<string> smsIndexKeys = new HashSet<string>();
+        private readonly HashSet<string> smsContentKeys = new HashSet<string>();
         private const int MaxAutoConnectAttempts = 10;
         private const string StartupRunName = "EC20电话短信工具";
 
@@ -188,42 +192,28 @@ namespace Ec20PhoneTool
             root.Padding = new Padding(14);
             root.RowCount = 3;
             root.ColumnCount = 1;
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
             Controls.Add(root);
-
-            var topRoot = new TableLayoutPanel();
-            topRoot.Dock = DockStyle.Fill;
-            topRoot.RowCount = 2;
-            topRoot.ColumnCount = 1;
-            topRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            topRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            root.Controls.Add(topRoot, 0, 0);
 
             var top = new FlowLayoutPanel();
             top.Dock = DockStyle.Fill;
             top.WrapContents = true;
             top.AutoScroll = false;
-            topRoot.Controls.Add(top, 0, 0);
+            root.Controls.Add(top, 0, 0);
 
-            var topSecond = new FlowLayoutPanel();
-            topSecond.Dock = DockStyle.Fill;
-            topSecond.WrapContents = true;
-            topSecond.AutoScroll = false;
-            topRoot.Controls.Add(topSecond, 0, 1);
+            settingsButton = new Button { Text = "设置", Width = 90, Height = 32 };
+            settingsButton.Click += delegate { ShowSettingsDialog(); };
+            top.Controls.Add(settingsButton);
 
-            top.Controls.Add(new Label { Text = "AT 端口", AutoSize = true, Padding = new Padding(0, 8, 4, 0) });
             portBox = new ComboBox { Width = 220, DropDownStyle = ComboBoxStyle.DropDown };
-            top.Controls.Add(portBox);
 
             refreshButton = new Button { Text = "刷新", Width = 90, Height = 32 };
             refreshButton.Click += delegate { RefreshPorts(); };
-            top.Controls.Add(refreshButton);
 
             connectButton = new Button { Text = "连接", Width = 100, Height = 32 };
             connectButton.Click += delegate { ToggleConnection(); };
-            top.Controls.Add(connectButton);
 
             connectionDot = new Panel { Width = 18, Height = 18, Margin = new Padding(12, 8, 2, 0) };
             connectionDot.Paint += delegate(object sender, PaintEventArgs e) { PaintConnectionDot(e.Graphics); };
@@ -237,33 +227,19 @@ namespace Ec20PhoneTool
 
             startupButton = new Button { Text = "开机自启：检查中", Width = 150, Height = 32 };
             startupButton.Click += delegate { ToggleStartup(); };
-            topSecond.Controls.Add(startupButton);
-
-            var audioCheckButton = new Button { Text = "音频检查", Width = 110, Height = 32 };
-            audioCheckButton.Click += delegate { CheckAudioDevices(); };
-            topSecond.Controls.Add(audioCheckButton);
-
-            var recoverButton = new Button { Text = "重新搜网", Width = 110, Height = 32 };
-            recoverButton.Click += delegate { RecoverService(); };
-            topSecond.Controls.Add(recoverButton);
-
-            var soundButton = new Button { Text = "声音设置", Width = 130, Height = 32 };
-            soundButton.Click += delegate { System.Diagnostics.Process.Start("ms-settings:sound"); };
-            topSecond.Controls.Add(soundButton);
 
             volteDot = new Panel { Width = 18, Height = 18, Margin = new Padding(12, 8, 2, 0) };
             volteDot.Paint += delegate(object sender, PaintEventArgs e) { PaintVolteDot(e.Graphics); };
-            topSecond.Controls.Add(volteDot);
+            top.Controls.Add(volteDot);
 
             volteStatusLabel = new Label { Text = "VoLTE：未知", AutoSize = true, Padding = new Padding(0, 8, 4, 0) };
-            topSecond.Controls.Add(volteStatusLabel);
+            top.Controls.Add(volteStatusLabel);
 
             volteSwitch = new CheckBox { Text = "VoLTE开关", Width = 120, Height = 32, Appearance = Appearance.Button, TextAlign = ContentAlignment.MiddleCenter };
             volteSwitch.CheckedChanged += delegate
             {
                 if (!updatingVolteSwitch) SetVolteEnabled(volteSwitch.Checked);
             };
-            topSecond.Controls.Add(volteSwitch);
 
             var calls = new FlowLayoutPanel();
             calls.Dock = DockStyle.Top;
@@ -448,6 +424,98 @@ namespace Ec20PhoneTool
             parent.Controls.Add(button);
         }
 
+        private void ShowSettingsDialog()
+        {
+            var form = new Form();
+            form.Text = "设置";
+            form.Width = 520;
+            form.Height = 300;
+            form.MinimumSize = new Size(480, 280);
+            form.StartPosition = FormStartPosition.CenterParent;
+            form.Font = Font;
+
+            var root = new TableLayoutPanel();
+            root.Dock = DockStyle.Fill;
+            root.Padding = new Padding(14);
+            root.RowCount = 5;
+            root.ColumnCount = 1;
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            form.Controls.Add(root);
+
+            var portRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+            root.Controls.Add(portRow, 0, 0);
+            portRow.Controls.Add(new Label { Text = "AT 端口", AutoSize = true, Padding = new Padding(0, 8, 4, 0) });
+            var dialogPortBox = new ComboBox { Width = 180, DropDownStyle = ComboBoxStyle.DropDown };
+            foreach (var item in portBox.Items) dialogPortBox.Items.Add(item);
+            dialogPortBox.Text = Convert.ToString(portBox.Text);
+            portRow.Controls.Add(dialogPortBox);
+
+            var refreshDialogButton = new Button { Text = "刷新", Width = 80, Height = 32 };
+            refreshDialogButton.Click += delegate
+            {
+                RefreshPorts();
+                dialogPortBox.Items.Clear();
+                foreach (var item in portBox.Items) dialogPortBox.Items.Add(item);
+                dialogPortBox.Text = Convert.ToString(portBox.Text);
+            };
+            portRow.Controls.Add(refreshDialogButton);
+
+            var connectDialogButton = new Button { Text = IsConnected ? "断开" : "连接", Width = 80, Height = 32 };
+            connectDialogButton.Click += delegate
+            {
+                portBox.Text = dialogPortBox.Text;
+                ToggleConnection();
+                connectDialogButton.Text = IsConnected ? "断开" : "连接";
+            };
+            portRow.Controls.Add(connectDialogButton);
+
+            var actionRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+            root.Controls.Add(actionRow, 0, 1);
+            var audioButton = new Button { Text = "音频检查", Width = 90, Height = 32 };
+            audioButton.Click += delegate { CheckAudioDevices(); };
+            actionRow.Controls.Add(audioButton);
+            var recoverButton = new Button { Text = "重新搜网", Width = 90, Height = 32 };
+            recoverButton.Click += delegate { RecoverService(); };
+            actionRow.Controls.Add(recoverButton);
+            var soundButton = new Button { Text = "声音设置", Width = 90, Height = 32 };
+            soundButton.Click += delegate { System.Diagnostics.Process.Start("ms-settings:sound"); };
+            actionRow.Controls.Add(soundButton);
+
+            var checkRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+            root.Controls.Add(checkRow, 0, 2);
+            var startupCheckBox = new CheckBox { Text = "开机自启", Checked = IsStartupEnabled(), AutoSize = true, Padding = new Padding(0, 8, 18, 0) };
+            checkRow.Controls.Add(startupCheckBox);
+            var volteCheckBox = new CheckBox { Text = "VoLTE 开关", Checked = volteSwitch != null && volteSwitch.Checked, AutoSize = true, Padding = new Padding(0, 8, 18, 0) };
+            volteCheckBox.Enabled = IsConnected && simReady;
+            if (!volteCheckBox.Enabled) volteCheckBox.Text = "VoLTE 开关（SIM卡不可用）";
+            checkRow.Controls.Add(volteCheckBox);
+
+            var mbnLabel = new Label { Text = "当前 MBN：" + (string.IsNullOrWhiteSpace(currentMbn) ? "未知" : currentMbn), Dock = DockStyle.Fill, AutoSize = false, Padding = new Padding(0, 8, 0, 0) };
+            root.Controls.Add(mbnLabel, 0, 3);
+
+            var bottomRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
+            root.Controls.Add(bottomRow, 0, 4);
+            var saveButton = new Button { Text = "保存", Width = 90, Height = 32 };
+            saveButton.Click += delegate
+            {
+                portBox.Text = dialogPortBox.Text;
+                if (startupCheckBox.Checked) EnableStartup();
+                else DisableStartup();
+                UpdateStartupButton();
+                if (volteCheckBox.Enabled && volteSwitch != null && volteSwitch.Checked != volteCheckBox.Checked) SetVolteEnabled(volteCheckBox.Checked);
+                statusLabel.Text = "设置已保存。";
+                form.Close();
+            };
+            bottomRow.Controls.Add(saveButton);
+
+            form.ShowDialog(this);
+            form.Dispose();
+        }
+
         private ListView CreateSmsListView()
         {
             var listView = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, GridLines = true, HideSelection = false };
@@ -498,12 +566,17 @@ namespace Ec20PhoneTool
 
         private void UpdateVolteIndicators()
         {
+            bool showVolte = IsConnected && simReady;
+            if (volteDot != null) volteDot.Visible = showVolte;
+            if (volteStatusLabel != null) volteStatusLabel.Visible = showVolte;
+            if (volteSwitch != null) volteSwitch.Visible = showVolte;
+            if (!showVolte) return;
+
             if (volteStatusLabel != null)
             {
-                if (volteState == 1) volteStatusLabel.Text = "VoLTE：实际可用";
-                else if (volteState == 0) volteStatusLabel.Text = "VoLTE：已关闭";
-                else if (volteState == 2) volteStatusLabel.Text = "VoLTE：设置中";
-                else if (volteState == 3) volteStatusLabel.Text = "VoLTE：已开未注册";
+                if (volteState == 1) volteStatusLabel.Text = "VoLTE可用";
+                else if (volteState == 0) volteStatusLabel.Text = "VoLTE关闭";
+                else if (volteState == 2 || volteState == 3) volteStatusLabel.Text = "VoLTE注册中";
                 else volteStatusLabel.Text = "VoLTE：未知";
             }
 
@@ -530,7 +603,7 @@ namespace Ec20PhoneTool
             {
                 if (ready) connectionTextLabel.Text = "可用";
                 else if (!connected) connectionTextLabel.Text = "未连接";
-                else if (!simReady) connectionTextLabel.Text = "SIM 未就绪";
+                else if (!simReady) connectionTextLabel.Text = "SIM卡不可用";
                 else if (searching) connectionTextLabel.Text = "搜网中";
                 else connectionTextLabel.Text = "无服务";
             }
@@ -550,6 +623,7 @@ namespace Ec20PhoneTool
                     signalLabel.Text = "信号：" + SignalIcon(lastSignal) + " " + lastSignal + "/31";
                 }
             }
+            UpdateVolteIndicators();
         }
 
         private bool IsServiceReady()
@@ -736,6 +810,11 @@ namespace Ec20PhoneTool
             ParseServiceStatusFromText(qnwinfo);
             var networkMatch = Regex.Match(qnwinfo, @"\+QNWINFO:\s*""([^""]+)""");
             if (networkMatch.Success) lines.Add("网络：" + networkMatch.Groups[1].Value);
+
+            string mbn = SendCommandAndRead(targetPort, "AT+QMBNCFG=\"List\"", 1200);
+            ParseMbnStatusFromText(mbn);
+            if (!string.IsNullOrWhiteSpace(currentMbn) && currentMbn != "未知") lines.Add("MBN：" + currentMbn);
+
             UpdateConnectionIndicators(IsConnected || targetPort.IsOpen, lastSignal);
 
             return string.Join(Environment.NewLine, lines.ToArray());
@@ -759,6 +838,7 @@ namespace Ec20PhoneTool
             volteConfigState = -1;
             volteDisableState = -1;
             imsRegisteredState = -1;
+            currentMbn = "未知";
             lastSignal = -1;
             readingSms = false;
             noServiceTicks = 0;
@@ -819,6 +899,8 @@ namespace Ec20PhoneTool
         private void LoadSmsRecords()
         {
             smsRecords.Clear();
+            smsIndexKeys.Clear();
+            smsContentKeys.Clear();
             if (!File.Exists(smsStorePath)) return;
             foreach (string line in File.ReadAllLines(smsStorePath, Encoding.UTF8))
             {
@@ -839,6 +921,7 @@ namespace Ec20PhoneTool
                     SegmentIndexes = parts.Length >= 7 ? DecodeField(parts[6]) : modemIndex.ToString()
                 });
             }
+            RebuildSmsIndexes();
         }
 
         private void SaveSmsRecords()
@@ -901,13 +984,23 @@ namespace Ec20PhoneTool
         private void RefreshSmsList()
         {
             if (smsListView == null || sentSmsListView == null) return;
-            smsListView.Items.Clear();
-            sentSmsListView.Items.Clear();
-            for (int i = smsRecords.Count - 1; i >= 0; i--)
+            smsListView.BeginUpdate();
+            sentSmsListView.BeginUpdate();
+            try
             {
-                var record = smsRecords[i];
-                var target = record.Direction == "发出" ? sentSmsListView : smsListView;
-                target.Items.Add(CreateSmsListItem(record));
+                smsListView.Items.Clear();
+                sentSmsListView.Items.Clear();
+                for (int i = smsRecords.Count - 1; i >= 0; i--)
+                {
+                    var record = smsRecords[i];
+                    var target = record.Direction == "发出" ? sentSmsListView : smsListView;
+                    target.Items.Add(CreateSmsListItem(record));
+                }
+            }
+            finally
+            {
+                smsListView.EndUpdate();
+                sentSmsListView.EndUpdate();
             }
             ShowSelectedSmsDetail();
         }
@@ -916,9 +1009,16 @@ namespace Ec20PhoneTool
         {
             var item = new ListViewItem(record.ReceivedAt.ToString("yyyy-MM-dd HH:mm:ss"));
             item.SubItems.Add(record.Number);
-            item.SubItems.Add(record.Text);
+            item.SubItems.Add(CreatePreviewText(record.Text, 120));
             item.Tag = record;
             return item;
+        }
+
+        private string CreatePreviewText(string text, int maxLength)
+        {
+            string value = Regex.Replace(text ?? "", @"\s+", " ").Trim();
+            if (value.Length <= maxLength) return value;
+            return value.Substring(0, maxLength) + "...";
         }
 
         private void ShowSelectedSmsDetail()
@@ -985,6 +1085,7 @@ namespace Ec20PhoneTool
                 }
             }
             SaveSmsRecords();
+            RebuildSmsIndexes();
             RefreshSmsList();
             statusLabel.Text = "已删除选中的短信。";
         }
@@ -1081,6 +1182,7 @@ namespace Ec20PhoneTool
             volteConfigState = -1;
             volteDisableState = -1;
             imsRegisteredState = -1;
+            currentMbn = "未知";
             statusLabel.Text = "正在重新搜网。";
             UpdateConnectionIndicators(true, -1);
             UpdateVolteIndicators();
@@ -1233,6 +1335,7 @@ namespace Ec20PhoneTool
             SendCommand("AT+QNWINFO");
             SendCommand("AT+QCFG=\"ims\"");
             SendCommand("AT+QCFG=\"volte_disable\"");
+            SendCommand("AT+QMBNCFG=\"List\"");
             SendCommand("AT+CPMS?");
             SendCommand("AT+CLCC");
         }
@@ -1248,6 +1351,7 @@ namespace Ec20PhoneTool
             SendCommandSilent("AT+QNWINFO");
             SendCommandSilent("AT+QCFG=\"ims\"");
             SendCommandSilent("AT+QCFG=\"volte_disable\"");
+            SendCommandSilent("AT+QMBNCFG=\"List\"");
         }
 
         private void PollModemStatus()
@@ -1330,6 +1434,7 @@ namespace Ec20PhoneTool
             volteConfigState = -1;
             volteDisableState = -1;
             imsRegisteredState = -1;
+            currentMbn = "未知";
             lastSignal = -1;
             readingSms = false;
             noServiceTicks = 0;
@@ -1710,6 +1815,7 @@ namespace Ec20PhoneTool
                     AppendAndParseSerialText(text);
                     ParseServiceStatusFromText(text);
                     ParseVolteStatusFromText(text);
+                    ParseMbnStatusFromText(text);
                     UpdateSignalFromText(text);
                     HandleCallAndSmsEvents(text);
                 }));
@@ -1845,9 +1951,30 @@ namespace Ec20PhoneTool
             {
                 RecalculateVolteState();
                 UpdateVolteIndicators();
-                if (volteState == 1) statusLabel.Text = "VoLTE 实际可用。";
-                else if (volteState == 3) statusLabel.Text = "VoLTE 配置已开启，但 IMS 尚未注册。";
-                else if (volteState == 0) statusLabel.Text = "VoLTE 已关闭或当前不可用。";
+                if (volteState == 1) statusLabel.Text = "VoLTE可用。";
+                else if (volteState == 3) statusLabel.Text = "VoLTE注册中。";
+                else if (volteState == 0) statusLabel.Text = "VoLTE关闭。";
+            }
+        }
+
+        private void ParseMbnStatusFromText(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.IndexOf("+QMBNCFG:", StringComparison.OrdinalIgnoreCase) < 0) return;
+
+            foreach (Match match in Regex.Matches(text, @"\+QMBNCFG:\s*""List"",\s*\d+,\s*(\d+),\s*(\d+),\s*""([^""]+)"""))
+            {
+                bool selected = match.Groups[1].Value == "1";
+                bool active = match.Groups[2].Value == "1";
+                string name = match.Groups[3].Value;
+                if (selected && active)
+                {
+                    currentMbn = name;
+                    return;
+                }
+                if (selected && (string.IsNullOrWhiteSpace(currentMbn) || currentMbn == "未知"))
+                {
+                    currentMbn = name + "（未激活）";
+                }
             }
         }
 
@@ -2081,23 +2208,50 @@ namespace Ec20PhoneTool
         private void AddSmsRecord(string direction, string number, string body, int modemIndex, string storage, DateTime receivedAt)
         {
             if (string.IsNullOrWhiteSpace(body)) return;
-            foreach (var existing in smsRecords)
-            {
-                if (modemIndex > 0 && existing.Storage == storage && Array.IndexOf(GetSegmentIndexes(existing), modemIndex) >= 0) return;
-                if (existing.Number == number && existing.Text == body && Math.Abs((existing.ReceivedAt - receivedAt).TotalSeconds) < 5) return;
-            }
+            string cleanNumber = string.IsNullOrWhiteSpace(number) ? "未知号码" : number;
+            if (modemIndex > 0 && smsIndexKeys.Contains(BuildSmsIndexKey(storage, modemIndex))) return;
+            if (smsContentKeys.Contains(BuildSmsContentKey(direction, cleanNumber, body, receivedAt))) return;
 
-            smsRecords.Add(new SmsRecord
+            var record = new SmsRecord
             {
                 ReceivedAt = receivedAt,
                 Direction = direction,
-                Number = string.IsNullOrWhiteSpace(number) ? "未知号码" : number,
+                Number = cleanNumber,
                 Text = body,
                 ModemIndex = modemIndex,
                 Storage = storage,
                 SegmentIndexes = modemIndex > 0 ? modemIndex.ToString() : ""
-            });
+            };
+            smsRecords.Add(record);
+            AddSmsRecordToIndexes(record);
             if (!suppressSmsAutoSave) SaveSmsRecords();
+        }
+
+        private void RebuildSmsIndexes()
+        {
+            smsIndexKeys.Clear();
+            smsContentKeys.Clear();
+            foreach (var record in smsRecords) AddSmsRecordToIndexes(record);
+        }
+
+        private void AddSmsRecordToIndexes(SmsRecord record)
+        {
+            if (record == null) return;
+            foreach (int index in GetSegmentIndexes(record))
+            {
+                if (index > 0) smsIndexKeys.Add(BuildSmsIndexKey(record.Storage, index));
+            }
+            smsContentKeys.Add(BuildSmsContentKey(record.Direction, record.Number, record.Text, record.ReceivedAt));
+        }
+
+        private string BuildSmsIndexKey(string storage, int modemIndex)
+        {
+            return (storage ?? "") + ":" + modemIndex;
+        }
+
+        private string BuildSmsContentKey(string direction, string number, string body, DateTime receivedAt)
+        {
+            return (direction ?? "") + "\t" + (number ?? "") + "\t" + receivedAt.ToString("yyyyMMddHHmmss") + "\t" + (body ?? "");
         }
 
         private void MergeAdjacentSmsSegments()
@@ -2136,6 +2290,7 @@ namespace Ec20PhoneTool
             }
             smsRecords.Clear();
             smsRecords.AddRange(merged);
+            RebuildSmsIndexes();
         }
 
         private int FirstSegmentIndex(SmsRecord record)
