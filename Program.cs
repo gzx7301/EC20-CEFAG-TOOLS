@@ -94,6 +94,7 @@ namespace Ec20PhoneTool
         private TextBox logBox;
         private TextBox atCommandBox;
         private TextBox smsDetailBox;
+        private CheckBox logAutoScrollBox;
         private ListView smsListView;
         private ListView sentSmsListView;
         private ListView callListView;
@@ -138,6 +139,7 @@ namespace Ec20PhoneTool
         private DateTime dialAttemptStartedAt;
         private DateTime commandQuietUntil;
         private volatile bool directSerialReadActive;
+        private bool suppressSmsAutoSave;
         private const int MaxAutoConnectAttempts = 10;
         private const string StartupRunName = "EC20电话短信工具";
 
@@ -389,6 +391,8 @@ namespace Ec20PhoneTool
             var atTools = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
             atRoot.Controls.Add(atTools, 0, 0);
             AddButton(atTools, "保存日志", delegate { SaveAtLog(); });
+            logAutoScrollBox = new CheckBox { Text = "自动滚动", Checked = true, AutoSize = true, Padding = new Padding(8, 7, 0, 0) };
+            atTools.Controls.Add(logAutoScrollBox);
             logBox = new TextBox();
             logBox.Dock = DockStyle.Fill;
             logBox.Multiline = true;
@@ -1538,11 +1542,19 @@ namespace Ec20PhoneTool
                     }
 
                     int before = smsRecords.Count;
-                    foreach (var chunk in chunks)
+                    try
                     {
-                        Log(chunk.LogText);
-                        LogDecodedSmsLines(chunk.Text);
-                        ParseSmsList(chunk.Text, chunk.Storage);
+                        suppressSmsAutoSave = true;
+                        foreach (var chunk in chunks)
+                        {
+                            Log(chunk.LogText);
+                            LogDecodedSmsLines(chunk.Text);
+                            ParseSmsList(chunk.Text, chunk.Storage);
+                        }
+                    }
+                    finally
+                    {
+                        suppressSmsAutoSave = false;
                     }
                     MergeAdjacentSmsSegments();
                     SaveSmsRecords();
@@ -2012,8 +2024,11 @@ namespace Ec20PhoneTool
             }
             if (matches.Count > 0)
             {
-                SaveSmsRecords();
-                RefreshSmsList();
+                if (!suppressSmsAutoSave)
+                {
+                    SaveSmsRecords();
+                    RefreshSmsList();
+                }
                 statusLabel.Text = "短信读取完成，已保存到本机。";
                 readingSms = false;
             }
@@ -2082,7 +2097,7 @@ namespace Ec20PhoneTool
                 Storage = storage,
                 SegmentIndexes = modemIndex > 0 ? modemIndex.ToString() : ""
             });
-            SaveSmsRecords();
+            if (!suppressSmsAutoSave) SaveSmsRecords();
         }
 
         private void MergeAdjacentSmsSegments()
@@ -2346,9 +2361,27 @@ namespace Ec20PhoneTool
         private void Log(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
-            logBox.AppendText(DateTime.Now.ToString("HH:mm:ss") + " " + text.TrimEnd() + Environment.NewLine);
-            logBox.SelectionStart = logBox.TextLength;
-            logBox.ScrollToCaret();
+            AppendLogText(DateTime.Now.ToString("HH:mm:ss") + " " + text.TrimEnd() + Environment.NewLine);
+        }
+
+        private void AppendLogText(string text)
+        {
+            if (logBox == null || string.IsNullOrEmpty(text)) return;
+            bool autoScroll = logAutoScrollBox == null || logAutoScrollBox.Checked;
+            int selectionStart = logBox.SelectionStart;
+            int selectionLength = logBox.SelectionLength;
+            logBox.AppendText(text);
+            if (autoScroll)
+            {
+                logBox.SelectionStart = logBox.TextLength;
+                logBox.ScrollToCaret();
+            }
+            else
+            {
+                logBox.SelectionStart = Math.Min(selectionStart, logBox.TextLength);
+                logBox.SelectionLength = Math.Min(selectionLength, logBox.TextLength - logBox.SelectionStart);
+                logBox.ScrollToCaret();
+            }
         }
 
         private void SaveAtLog()
@@ -2379,7 +2412,7 @@ namespace Ec20PhoneTool
                 string decoded = TryDecodeUcs2(line);
                 if (!string.IsNullOrWhiteSpace(decoded))
                 {
-                    logBox.AppendText(DateTime.Now.ToString("HH:mm:ss") + " 短信内容: " + decoded + Environment.NewLine);
+                    AppendLogText(DateTime.Now.ToString("HH:mm:ss") + " 短信内容: " + decoded + Environment.NewLine);
                 }
             }
         }
