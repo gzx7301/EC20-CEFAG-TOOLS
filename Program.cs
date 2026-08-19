@@ -737,33 +737,9 @@ namespace Ec20PhoneTool
                 Log(">> AT+CGACT?" + Environment.NewLine + cgactText.TrimEnd());
                 Log(">> AT+QIACT?" + Environment.NewLine + qiactText.TrimEnd());
 
-                ParseMbnStatusFromText(mbnText);
-                bool hasActiveMbn = false;
-                foreach (Match match in Regex.Matches(mbnText, @"\+QMBNCFG:\s*""List"",\s*\d+,\s*(\d+),\s*(\d+),\s*""([^""]+)"""))
-                {
-                    bool selected = match.Groups[1].Value == "1";
-                    bool active = match.Groups[2].Value == "1";
-                    var row = new MbnInfoRow();
-                    row.Name = match.Groups[3].Value;
-                    if (selected && active)
-                    {
-                        row.State = 2;
-                        row.StateText = "激活";
-                        hasActiveMbn = true;
-                    }
-                    else if (selected)
-                    {
-                        row.State = 1;
-                        row.StateText = "未知";
-                    }
-                    else
-                    {
-                        row.State = 0;
-                        row.StateText = "未激活";
-                    }
-                    mbnRows.Add(row);
-                }
-                if (!hasActiveMbn && mbnRows.Count == 0)
+                mbnRows.AddRange(ParseMbnRows(mbnText));
+                ParseMbnStatusFromRows(mbnRows);
+                if (mbnRows.Count == 0)
                 {
                     mbnRows.Add(new MbnInfoRow { Name = "未读取到 MBN 信息", State = 1, StateText = "未知" });
                 }
@@ -822,6 +798,83 @@ namespace Ec20PhoneTool
             }
             finally
             {
+            }
+        }
+
+        private List<MbnInfoRow> ParseMbnRows(string text)
+        {
+            var rows = new List<MbnInfoRow>();
+            if (string.IsNullOrWhiteSpace(text)) return rows;
+
+            foreach (Match match in Regex.Matches(text, @"\+QMBNCFG:\s*""List"",\s*\d+,\s*(\d+),\s*(\d+),\s*""([^""]+)""", RegexOptions.IgnoreCase))
+            {
+                rows.Add(CreateMbnInfoRow(match.Groups[3].Value, match.Groups[1].Value == "1", match.Groups[2].Value == "1"));
+            }
+
+            if (rows.Count > 0) return rows;
+
+            foreach (string rawLine in text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (rawLine.IndexOf("+QMBNCFG:", StringComparison.OrdinalIgnoreCase) < 0
+                    || rawLine.IndexOf("\"List\"", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    continue;
+                }
+
+                var quoted = Regex.Matches(rawLine, "\"([^\"]+)\"");
+                if (quoted.Count < 2) continue;
+
+                string name = quoted[quoted.Count - 1].Groups[1].Value;
+                string beforeName = rawLine.Substring(0, rawLine.LastIndexOf("\"" + name + "\"", StringComparison.Ordinal));
+                var numbers = Regex.Matches(beforeName, @"(?<![A-Za-z0-9])(\d+)(?![A-Za-z0-9])");
+                bool selected = numbers.Count >= 2 && numbers[numbers.Count - 2].Groups[1].Value == "1";
+                bool active = numbers.Count >= 1 && numbers[numbers.Count - 1].Groups[1].Value == "1";
+                rows.Add(CreateMbnInfoRow(name, selected, active));
+            }
+
+            return rows;
+        }
+
+        private MbnInfoRow CreateMbnInfoRow(string name, bool selected, bool active)
+        {
+            var row = new MbnInfoRow();
+            row.Name = string.IsNullOrWhiteSpace(name) ? "未知 MBN" : name;
+            if (selected && active)
+            {
+                row.State = 2;
+                row.StateText = "激活";
+            }
+            else if (selected)
+            {
+                row.State = 1;
+                row.StateText = "未知";
+            }
+            else
+            {
+                row.State = 0;
+                row.StateText = "未激活";
+            }
+            return row;
+        }
+
+        private void ParseMbnStatusFromRows(List<MbnInfoRow> rows)
+        {
+            if (rows == null || rows.Count == 0) return;
+            foreach (MbnInfoRow row in rows)
+            {
+                if (row.State == 2)
+                {
+                    currentMbn = row.Name;
+                    return;
+                }
+            }
+            foreach (MbnInfoRow row in rows)
+            {
+                if (row.State == 1)
+                {
+                    currentMbn = row.Name;
+                    return;
+                }
             }
         }
 
@@ -1096,10 +1149,18 @@ namespace Ec20PhoneTool
         {
             lock (serialCommandLock)
             {
-                targetPort.DiscardInBuffer();
-                targetPort.Write(command + "\r");
-                Thread.Sleep(waitMs);
-                return targetPort.ReadExisting().Replace("\0", "");
+                directSerialReadActive = true;
+                try
+                {
+                    targetPort.DiscardInBuffer();
+                    targetPort.Write(command + "\r");
+                    Thread.Sleep(waitMs);
+                    return targetPort.ReadExisting().Replace("\0", "");
+                }
+                finally
+                {
+                    directSerialReadActive = false;
+                }
             }
         }
 
@@ -2452,22 +2513,7 @@ namespace Ec20PhoneTool
         private void ParseMbnStatusFromText(string text)
         {
             if (string.IsNullOrEmpty(text) || text.IndexOf("+QMBNCFG:", StringComparison.OrdinalIgnoreCase) < 0) return;
-
-            foreach (Match match in Regex.Matches(text, @"\+QMBNCFG:\s*""List"",\s*\d+,\s*(\d+),\s*(\d+),\s*""([^""]+)"""))
-            {
-                bool selected = match.Groups[1].Value == "1";
-                bool active = match.Groups[2].Value == "1";
-                string name = match.Groups[3].Value;
-                if (selected && active)
-                {
-                    currentMbn = name;
-                    return;
-                }
-                if (selected && (string.IsNullOrWhiteSpace(currentMbn) || currentMbn == "未知"))
-                {
-                    currentMbn = name + "（未激活）";
-                }
-            }
+            ParseMbnStatusFromRows(ParseMbnRows(text));
         }
 
         private void RecalculateVolteState()
