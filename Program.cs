@@ -72,6 +72,9 @@ namespace Ec20PhoneTool
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
     }
 
     public class MainForm : Form
@@ -85,6 +88,7 @@ namespace Ec20PhoneTool
         private Panel connectionDot;
         private Label connectionTextLabel;
         private Label signalLabel;
+        private Label networkLabel;
         private Panel volteDot;
         private Label volteStatusLabel;
         private CheckBox volteSwitch;
@@ -96,6 +100,7 @@ namespace Ec20PhoneTool
         private TextBox atCommandBox;
         private TextBox smsDetailBox;
         private CheckBox logAutoScrollBox;
+        private Form atLogForm;
         private ListView smsListView;
         private ListView sentSmsListView;
         private ListView callListView;
@@ -106,10 +111,12 @@ namespace Ec20PhoneTool
         private EventWaitHandle showSignalEvent;
         private NotifyIcon notifyIcon;
         private CallPopupForm callPopup;
+        private Ec20AudioBridge audioBridge;
         private string lastCallerNumber = "";
         private string serialReceiveBuffer = "";
         private int statusPollTicks;
         private int lastSignal = -1;
+        private string currentNetworkType = "";
         private bool simReady;
         private bool networkReady;
         private bool networkSearching;
@@ -125,10 +132,12 @@ namespace Ec20PhoneTool
         private volatile bool waitingForSmsPrompt;
         private readonly List<SmsRecord> smsRecords = new List<SmsRecord>();
         private readonly List<CallRecord> callRecords = new List<CallRecord>();
-        private readonly string dataDir;
-        private readonly string smsStorePath;
-        private readonly string callStorePath;
-        private readonly string settingsPath;
+        private readonly string defaultDataDir;
+        private string dataDir;
+        private string smsStorePath;
+        private string callStorePath;
+        private string settingsPath;
+        private readonly object serialCommandLock = new object();
         private readonly bool startHidden;
         private bool allowExit;
         private bool autoConnectFinished;
@@ -142,10 +151,13 @@ namespace Ec20PhoneTool
         private DateTime commandQuietUntil;
         private volatile bool directSerialReadActive;
         private bool suppressSmsAutoSave;
+        private bool audioBridgeEnabled = true;
+        private readonly StringBuilder atLogBuffer = new StringBuilder();
         private readonly HashSet<string> smsIndexKeys = new HashSet<string>();
         private readonly HashSet<string> smsContentKeys = new HashSet<string>();
         private const int MaxAutoConnectAttempts = 10;
         private const string StartupRunName = "EC20电话短信工具";
+        private const string AppRegistryKey = @"Software\EC20电话短信工具";
 
         public MainForm(bool startHidden)
         {
@@ -155,10 +167,9 @@ namespace Ec20PhoneTool
             Height = 680;
             MinimumSize = new Size(760, 560);
             Font = new Font("Segoe UI", 10f);
-            dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EC20电话短信工具");
-            smsStorePath = Path.Combine(dataDir, "短信记录.tsv");
-            callStorePath = Path.Combine(dataDir, "通话记录.tsv");
-            settingsPath = Path.Combine(dataDir, "设置.ini");
+            defaultDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EC20电话短信工具");
+            dataDir = LoadConfiguredDataDir();
+            UpdateDataPaths();
             BuildUi();
             LoadLocalData();
             RefreshPorts();
@@ -225,6 +236,9 @@ namespace Ec20PhoneTool
             signalLabel = new Label { Text = "信号：▁ 0/31", AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
             top.Controls.Add(signalLabel);
 
+            networkLabel = new Label { Text = "网络：--", AutoSize = true, Padding = new Padding(12, 8, 0, 0) };
+            top.Controls.Add(networkLabel);
+
             startupButton = new Button { Text = "开机自启：检查中", Width = 150, Height = 32 };
             startupButton.Click += delegate { ToggleStartup(); };
 
@@ -247,17 +261,16 @@ namespace Ec20PhoneTool
             calls.WrapContents = true;
             calls.AutoScroll = false;
 
-            calls.Controls.Add(new Label { Text = "地区号码", AutoSize = true, Padding = new Padding(0, 8, 4, 0) });
             areaCodeBox = new TextBox { Width = 80, Text = "+86" };
             areaCodeBox.Leave += delegate { SaveSettings(); };
+            areaCodeBox.HandleCreated += delegate { SetCueText(areaCodeBox, "地区号码"); };
             calls.Controls.Add(areaCodeBox);
-            calls.Controls.Add(new Label { Text = "号码", AutoSize = true, Padding = new Padding(10, 8, 4, 0) });
+            calls.Controls.Add(new Label { Text = "-", AutoSize = true, Padding = new Padding(4, 8, 4, 0) });
             numberBox = new TextBox { Width = 220 };
+            numberBox.HandleCreated += delegate { SetCueText(numberBox, "号码"); };
             calls.Controls.Add(numberBox);
 
             AddButton(calls, "拨号", delegate { Dial(); });
-            AddButton(calls, "接听", delegate { AnswerCall(); });
-            AddButton(calls, "挂断", delegate { HangUpCall(); });
 
             var tabs = new TabControl();
             tabs.Dock = DockStyle.Fill;
@@ -280,7 +293,7 @@ namespace Ec20PhoneTool
 
             var phoneHint = new Label
             {
-                Text = "通话音频请在 Windows 声音设置中选择 AC Interface 麦克风和扬声器。",
+                Text = "通话接通后会自动把 EC20 音频桥接到 Windows 默认播放/录音设备。",
                 Dock = DockStyle.Top,
                 AutoSize = true,
                 Padding = new Padding(2, 8, 0, 0)
@@ -291,6 +304,9 @@ namespace Ec20PhoneTool
             phoneRoot.Controls.Add(callTools, 0, 2);
             AddButton(callTools, "删除选中", delegate { DeleteSelectedCall(); });
             AddButton(callTools, "刷新列表", delegate { RefreshCallList(); });
+            var hangUpAllButton = new Button { Text = "挂断所有通话", Width = 120, Height = 32 };
+            hangUpAllButton.Click += delegate { HangUpCall(); };
+            callTools.Controls.Add(hangUpAllButton);
             callListView = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, GridLines = true, HideSelection = false };
             callListView.Columns.Add("开始时间", 150);
             callListView.Columns.Add("方向", 80);
@@ -353,48 +369,6 @@ namespace Ec20PhoneTool
             smsDetailBox = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, WordWrap = true };
             smsRoot.Controls.Add(smsDetailBox, 0, 3);
 
-            var atPage = new TabPage("AT信令");
-            atPage.Padding = new Padding(8);
-            tabs.Controls.Add(atPage);
-            var atRoot = new TableLayoutPanel();
-            atRoot.Dock = DockStyle.Fill;
-            atRoot.RowCount = 3;
-            atRoot.ColumnCount = 1;
-            atRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            atRoot.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            atRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            atPage.Controls.Add(atRoot);
-            var atTools = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-            atRoot.Controls.Add(atTools, 0, 0);
-            AddButton(atTools, "保存日志", delegate { SaveAtLog(); });
-            logAutoScrollBox = new CheckBox { Text = "自动滚动", Checked = true, AutoSize = true, Padding = new Padding(8, 7, 0, 0) };
-            atTools.Controls.Add(logAutoScrollBox);
-            logBox = new TextBox();
-            logBox.Dock = DockStyle.Fill;
-            logBox.Multiline = true;
-            logBox.ScrollBars = ScrollBars.Both;
-            logBox.WordWrap = false;
-            logBox.Font = new Font("Consolas", 10f);
-            atRoot.Controls.Add(logBox, 0, 1);
-
-            var atSendPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
-            atSendPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            atSendPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
-            atRoot.Controls.Add(atSendPanel, 0, 2);
-            atCommandBox = new TextBox { Dock = DockStyle.Fill };
-            atCommandBox.KeyDown += delegate(object sender, KeyEventArgs e)
-            {
-                if (e.KeyCode == Keys.Enter)
-                {
-                    e.SuppressKeyPress = true;
-                    SendAtCommandFromBox();
-                }
-            };
-            atSendPanel.Controls.Add(atCommandBox, 0, 0);
-            var atSendButton = new Button { Text = "发送", Dock = DockStyle.Fill };
-            atSendButton.Click += delegate { SendAtCommandFromBox(); };
-            atSendPanel.Controls.Add(atSendButton, 1, 0);
-
             statusLabel = new Label { Text = "未连接。请选择 EC20 AT 端口，或点击刷新端口。", Dock = DockStyle.Fill };
             root.Controls.Add(statusLabel, 0, 2);
 
@@ -424,25 +398,32 @@ namespace Ec20PhoneTool
             parent.Controls.Add(button);
         }
 
+        private void SetCueText(TextBox box, string text)
+        {
+            if (box == null || box.IsDisposed || !box.IsHandleCreated) return;
+            NativeMethods.SendMessage(box.Handle, 0x1501, IntPtr.Zero, text);
+        }
+
         private void ShowSettingsDialog()
         {
             var form = new Form();
             form.Text = "设置";
             form.Width = 520;
-            form.Height = 300;
-            form.MinimumSize = new Size(480, 280);
+            form.Height = 350;
+            form.MinimumSize = new Size(500, 330);
             form.StartPosition = FormStartPosition.CenterParent;
             form.Font = Font;
 
             var root = new TableLayoutPanel();
             root.Dock = DockStyle.Fill;
             root.Padding = new Padding(14);
-            root.RowCount = 5;
+            root.RowCount = 6;
             root.ColumnCount = 1;
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             form.Controls.Add(root);
 
@@ -484,11 +465,19 @@ namespace Ec20PhoneTool
             var soundButton = new Button { Text = "声音设置", Width = 90, Height = 32 };
             soundButton.Click += delegate { System.Diagnostics.Process.Start("ms-settings:sound"); };
             actionRow.Controls.Add(soundButton);
+            var atLogButton = new Button { Text = "AT信令", Width = 90, Height = 32 };
+            atLogButton.Click += delegate { ShowAtLogWindow(); };
+            actionRow.Controls.Add(atLogButton);
+            var mbnApnButton = new Button { Text = "MBN/APN信息", Width = 110, Height = 32 };
+            mbnApnButton.Click += delegate { ShowMbnApnWindow(); };
+            actionRow.Controls.Add(mbnApnButton);
 
             var checkRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
             root.Controls.Add(checkRow, 0, 2);
             var startupCheckBox = new CheckBox { Text = "开机自启", Checked = IsStartupEnabled(), AutoSize = true, Padding = new Padding(0, 8, 18, 0) };
             checkRow.Controls.Add(startupCheckBox);
+            var audioBridgeCheckBox = new CheckBox { Text = "通话音频桥接", Checked = audioBridgeEnabled, AutoSize = true, Padding = new Padding(0, 8, 18, 0) };
+            checkRow.Controls.Add(audioBridgeCheckBox);
             var volteCheckBox = new CheckBox { Text = "VoLTE 开关", Checked = volteSwitch != null && volteSwitch.Checked, AutoSize = true, Padding = new Padding(0, 8, 18, 0) };
             volteCheckBox.Enabled = IsConnected && simReady;
             if (!volteCheckBox.Enabled) volteCheckBox.Text = "VoLTE 开关（SIM卡不可用）";
@@ -497,8 +486,20 @@ namespace Ec20PhoneTool
             var mbnLabel = new Label { Text = "当前 MBN：" + (string.IsNullOrWhiteSpace(currentMbn) ? "未知" : currentMbn), Dock = DockStyle.Fill, AutoSize = false, Padding = new Padding(0, 8, 0, 0) };
             root.Controls.Add(mbnLabel, 0, 3);
 
+            var dataPathRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+            root.Controls.Add(dataPathRow, 0, 4);
+            var dataPathLabel = new Label { Text = "数据位置：" + dataDir, AutoSize = false, Width = 350, Height = 32, Padding = new Padding(0, 8, 0, 0) };
+            dataPathRow.Controls.Add(dataPathLabel);
+            var changeDataPathButton = new Button { Text = "修改路径", Width = 90, Height = 32 };
+            changeDataPathButton.Click += delegate
+            {
+                ChangeDataDirectory(form);
+                dataPathLabel.Text = "数据位置：" + dataDir;
+            };
+            dataPathRow.Controls.Add(changeDataPathButton);
+
             var bottomRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
-            root.Controls.Add(bottomRow, 0, 4);
+            root.Controls.Add(bottomRow, 0, 5);
             var saveButton = new Button { Text = "保存", Width = 90, Height = 32 };
             saveButton.Click += delegate
             {
@@ -506,6 +507,8 @@ namespace Ec20PhoneTool
                 if (startupCheckBox.Checked) EnableStartup();
                 else DisableStartup();
                 UpdateStartupButton();
+                audioBridgeEnabled = audioBridgeCheckBox.Checked;
+                SaveSettings();
                 if (volteCheckBox.Enabled && volteSwitch != null && volteSwitch.Checked != volteCheckBox.Checked) SetVolteEnabled(volteCheckBox.Checked);
                 statusLabel.Text = "设置已保存。";
                 form.Close();
@@ -514,6 +517,305 @@ namespace Ec20PhoneTool
 
             form.ShowDialog(this);
             form.Dispose();
+        }
+
+        private void ShowAtLogWindow()
+        {
+            if (atLogForm != null && !atLogForm.IsDisposed)
+            {
+                atLogForm.Show();
+                atLogForm.Activate();
+                return;
+            }
+
+            atLogForm = new Form();
+            atLogForm.Text = "AT信令";
+            atLogForm.Width = 820;
+            atLogForm.Height = 560;
+            atLogForm.MinimumSize = new Size(620, 420);
+            atLogForm.StartPosition = FormStartPosition.CenterParent;
+            atLogForm.Font = Font;
+
+            var atRoot = new TableLayoutPanel();
+            atRoot.Dock = DockStyle.Fill;
+            atRoot.Padding = new Padding(8);
+            atRoot.RowCount = 3;
+            atRoot.ColumnCount = 1;
+            atRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            atRoot.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            atRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            atLogForm.Controls.Add(atRoot);
+
+            var atTools = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+            atRoot.Controls.Add(atTools, 0, 0);
+            AddButton(atTools, "保存日志", delegate { SaveAtLog(); });
+            logAutoScrollBox = new CheckBox { Text = "自动滚动", Checked = true, AutoSize = true, Padding = new Padding(8, 7, 0, 0) };
+            atTools.Controls.Add(logAutoScrollBox);
+
+            logBox = new TextBox();
+            logBox.Dock = DockStyle.Fill;
+            logBox.Multiline = true;
+            logBox.ScrollBars = ScrollBars.Both;
+            logBox.WordWrap = false;
+            logBox.Font = new Font("Consolas", 10f);
+            logBox.Text = atLogBuffer.ToString();
+            logBox.SelectionStart = logBox.TextLength;
+            logBox.ScrollToCaret();
+            atRoot.Controls.Add(logBox, 0, 1);
+
+            var atSendPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
+            atSendPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            atSendPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+            atRoot.Controls.Add(atSendPanel, 0, 2);
+            atCommandBox = new TextBox { Dock = DockStyle.Fill };
+            atCommandBox.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    SendAtCommandFromBox();
+                }
+            };
+            atSendPanel.Controls.Add(atCommandBox, 0, 0);
+            var atSendButton = new Button { Text = "发送", Dock = DockStyle.Fill };
+            atSendButton.Click += delegate { SendAtCommandFromBox(); };
+            atSendPanel.Controls.Add(atSendButton, 1, 0);
+
+            atLogForm.FormClosed += delegate
+            {
+                atLogForm = null;
+                logBox = null;
+                atCommandBox = null;
+                logAutoScrollBox = null;
+            };
+            atLogForm.Show(this);
+        }
+
+        private void ShowMbnApnWindow()
+        {
+            if (!IsConnected)
+            {
+                MessageBox.Show("请先连接 EC20 的 AT 端口。", "未连接", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var form = new Form();
+            form.Text = "MBN/APN信息";
+            form.Width = 820;
+            form.Height = 520;
+            form.MinimumSize = new Size(680, 420);
+            form.StartPosition = FormStartPosition.CenterParent;
+            form.Font = Font;
+
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 2, RowCount = 2 };
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            form.Controls.Add(root);
+
+            root.Controls.Add(new Label { Text = "MBN", Dock = DockStyle.Fill, Font = new Font(Font, FontStyle.Bold) }, 0, 0);
+            root.Controls.Add(new Label { Text = "APN", Dock = DockStyle.Fill, Font = new Font(Font, FontStyle.Bold) }, 1, 0);
+
+            var mbnList = CreateStatusListView();
+            mbnList.Columns.Add("MBN名称", 270);
+            mbnList.Columns.Add("状态", 80);
+            var loadingMbn = CreateStatusItem(1, "正在读取 MBN 信息...");
+            loadingMbn.SubItems.Add("未知");
+            mbnList.Items.Add(loadingMbn);
+            root.Controls.Add(mbnList, 0, 1);
+
+            var apnList = CreateStatusListView();
+            apnList.Columns.Add("CID / APN", 270);
+            apnList.Columns.Add("状态", 80);
+            var loadingApn = CreateStatusItem(1, "正在读取 APN 信息...");
+            loadingApn.SubItems.Add("未知");
+            apnList.Items.Add(loadingApn);
+            root.Controls.Add(apnList, 1, 1);
+
+            form.Show(this);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                List<MbnInfoRow> mbnRows;
+                List<ApnInfoRow> apnRows;
+                Exception error = null;
+                try
+                {
+                    QueryMbnApnInfo(out mbnRows, out apnRows);
+                }
+                catch (Exception ex)
+                {
+                    mbnRows = new List<MbnInfoRow>();
+                    apnRows = new List<ApnInfoRow>();
+                    error = ex;
+                }
+
+                try
+                {
+                    BeginInvoke((Action)(delegate
+                    {
+                        if (form.IsDisposed) return;
+                        mbnList.Items.Clear();
+                        apnList.Items.Clear();
+                        if (error != null)
+                        {
+                            var mbnError = CreateStatusItem(1, "读取失败：" + error.Message);
+                            mbnError.SubItems.Add("未知");
+                            mbnList.Items.Add(mbnError);
+                            var apnError = CreateStatusItem(1, "读取失败：" + error.Message);
+                            apnError.SubItems.Add("未知");
+                            apnList.Items.Add(apnError);
+                            return;
+                        }
+
+                        FillMbnApnLists(mbnList, apnList, mbnRows, apnRows);
+                    }));
+                }
+                catch
+                {
+                }
+            });
+        }
+
+        private void FillMbnApnLists(ListView mbnList, ListView apnList, List<MbnInfoRow> mbnRows, List<ApnInfoRow> apnRows)
+        {
+            foreach (MbnInfoRow row in mbnRows)
+            {
+                var item = CreateStatusItem(row.State, row.Name);
+                item.SubItems.Add(row.StateText);
+                mbnList.Items.Add(item);
+            }
+            foreach (ApnInfoRow row in apnRows)
+            {
+                string name = "CID " + row.Cid + "  " + (string.IsNullOrWhiteSpace(row.Apn) ? "未设置" : row.Apn) + "  " + row.PdpType;
+                var item = CreateStatusItem(row.State, name);
+                item.SubItems.Add(row.StateText);
+                apnList.Items.Add(item);
+            }
+        }
+
+        private ListView CreateStatusListView()
+        {
+            var listView = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, GridLines = true, HideSelection = false };
+            listView.Columns.Add("", 34);
+            return listView;
+        }
+
+        private ListViewItem CreateStatusItem(int state, string text)
+        {
+            string dot = "●";
+            var item = new ListViewItem(dot);
+            item.SubItems.Add(text);
+            Color color = Color.FromArgb(150, 150, 150);
+            if (state == 2) color = Color.FromArgb(35, 170, 75);
+            else if (state == 1) color = Color.FromArgb(230, 170, 30);
+            item.ForeColor = color;
+            item.Tag = state;
+            return item;
+        }
+
+        private void QueryMbnApnInfo(out List<MbnInfoRow> mbnRows, out List<ApnInfoRow> apnRows)
+        {
+            mbnRows = new List<MbnInfoRow>();
+            apnRows = new List<ApnInfoRow>();
+            try
+            {
+                string mbnText = SendCommandAndRead(port, "AT+QMBNCFG=\"List\"", 1800);
+                string apnText = SendCommandAndRead(port, "AT+CGDCONT?", 1800);
+                string cgactText = SendCommandAndRead(port, "AT+CGACT?", 1400);
+                string qiactText = SendCommandAndRead(port, "AT+QIACT?", 1400);
+
+                Log(">> AT+QMBNCFG=\"List\"" + Environment.NewLine + mbnText.TrimEnd());
+                Log(">> AT+CGDCONT?" + Environment.NewLine + apnText.TrimEnd());
+                Log(">> AT+CGACT?" + Environment.NewLine + cgactText.TrimEnd());
+                Log(">> AT+QIACT?" + Environment.NewLine + qiactText.TrimEnd());
+
+                ParseMbnStatusFromText(mbnText);
+                bool hasActiveMbn = false;
+                foreach (Match match in Regex.Matches(mbnText, @"\+QMBNCFG:\s*""List"",\s*\d+,\s*(\d+),\s*(\d+),\s*""([^""]+)"""))
+                {
+                    bool selected = match.Groups[1].Value == "1";
+                    bool active = match.Groups[2].Value == "1";
+                    var row = new MbnInfoRow();
+                    row.Name = match.Groups[3].Value;
+                    if (selected && active)
+                    {
+                        row.State = 2;
+                        row.StateText = "激活";
+                        hasActiveMbn = true;
+                    }
+                    else if (selected)
+                    {
+                        row.State = 1;
+                        row.StateText = "未知";
+                    }
+                    else
+                    {
+                        row.State = 0;
+                        row.StateText = "未激活";
+                    }
+                    mbnRows.Add(row);
+                }
+                if (!hasActiveMbn && mbnRows.Count == 0)
+                {
+                    mbnRows.Add(new MbnInfoRow { Name = "未读取到 MBN 信息", State = 1, StateText = "未知" });
+                }
+
+                var activeCids = new HashSet<int>();
+                bool apnActivationKnown = false;
+                foreach (Match match in Regex.Matches(cgactText, @"\+CGACT:\s*(\d+),\s*(\d+)"))
+                {
+                    int cid;
+                    int active;
+                    if (int.TryParse(match.Groups[1].Value, out cid) && int.TryParse(match.Groups[2].Value, out active))
+                    {
+                        apnActivationKnown = true;
+                        if (active == 1) activeCids.Add(cid);
+                    }
+                }
+                foreach (Match match in Regex.Matches(qiactText, @"\+QIACT:\s*(\d+),"))
+                {
+                    int cid;
+                    if (int.TryParse(match.Groups[1].Value, out cid))
+                    {
+                        apnActivationKnown = true;
+                        activeCids.Add(cid);
+                    }
+                }
+
+                foreach (Match match in Regex.Matches(apnText, @"\+CGDCONT:\s*(\d+),\s*""([^""]*)"",\s*""([^""]*)"""))
+                {
+                    int cid;
+                    if (!int.TryParse(match.Groups[1].Value, out cid)) continue;
+                    var row = new ApnInfoRow();
+                    row.Cid = cid;
+                    row.PdpType = match.Groups[2].Value;
+                    row.Apn = match.Groups[3].Value;
+                    if (!apnActivationKnown)
+                    {
+                        row.State = 1;
+                        row.StateText = "未知";
+                    }
+                    else if (activeCids.Contains(cid))
+                    {
+                        row.State = 2;
+                        row.StateText = "激活";
+                    }
+                    else
+                    {
+                        row.State = 0;
+                        row.StateText = "未激活";
+                    }
+                    apnRows.Add(row);
+                }
+                if (apnRows.Count == 0)
+                {
+                    apnRows.Add(new ApnInfoRow { Cid = 0, PdpType = "", Apn = "未读取到 APN 信息", State = 1, StateText = "未知" });
+                }
+            }
+            finally
+            {
+            }
         }
 
         private ListView CreateSmsListView()
@@ -552,8 +854,9 @@ namespace Ec20PhoneTool
         {
             Color color;
             if (volteState == 1) color = Color.FromArgb(35, 170, 75);
-            else if (volteState == -1 || volteState == 2 || volteState == 3) color = Color.FromArgb(230, 170, 30);
-            else color = Color.FromArgb(210, 45, 45);
+            else if (volteState == 2 || volteState == 3) color = Color.FromArgb(230, 170, 30);
+            else if (volteState == 0) color = Color.FromArgb(210, 45, 45);
+            else color = Color.FromArgb(150, 150, 150);
 
             using (var brush = new SolidBrush(color))
             using (var pen = new Pen(Color.FromArgb(120, 120, 120)))
@@ -621,6 +924,21 @@ namespace Ec20PhoneTool
                 else
                 {
                     signalLabel.Text = "信号：" + SignalIcon(lastSignal) + " " + lastSignal + "/31";
+                }
+            }
+            if (networkLabel != null)
+            {
+                if (!connected || (!ready && !searching))
+                {
+                    networkLabel.Text = "网络：--";
+                }
+                else if (string.IsNullOrWhiteSpace(currentNetworkType))
+                {
+                    networkLabel.Text = "网络：--";
+                }
+                else
+                {
+                    networkLabel.Text = "网络：" + currentNetworkType;
                 }
             }
             UpdateVolteIndicators();
@@ -769,10 +1087,13 @@ namespace Ec20PhoneTool
 
         private string SendCommandAndRead(SerialPort targetPort, string command, int waitMs)
         {
-            targetPort.DiscardInBuffer();
-            targetPort.Write(command + "\r");
-            Thread.Sleep(waitMs);
-            return targetPort.ReadExisting().Replace("\0", "");
+            lock (serialCommandLock)
+            {
+                targetPort.DiscardInBuffer();
+                targetPort.Write(command + "\r");
+                Thread.Sleep(waitMs);
+                return targetPort.ReadExisting().Replace("\0", "");
+            }
         }
 
         private string BuildConnectionInfo(SerialPort targetPort)
@@ -864,12 +1185,74 @@ namespace Ec20PhoneTool
 
         private void LoadLocalData()
         {
+            dataDir = LoadConfiguredDataDir();
+            UpdateDataPaths();
             Directory.CreateDirectory(dataDir);
             LoadSettings();
             LoadSmsRecords();
             LoadCallRecords();
             RefreshSmsList();
             RefreshCallList();
+        }
+
+        private string LoadConfiguredDataDir()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(AppRegistryKey, false))
+                {
+                    string value = key == null ? "" : Convert.ToString(key.GetValue("DataDir"));
+                    if (!string.IsNullOrWhiteSpace(value)) return value;
+                }
+            }
+            catch
+            {
+            }
+            return defaultDataDir;
+        }
+
+        private void SaveConfiguredDataDir()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(AppRegistryKey))
+                {
+                    key.SetValue("DataDir", dataDir);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void UpdateDataPaths()
+        {
+            smsStorePath = Path.Combine(dataDir, "短信记录.tsv");
+            callStorePath = Path.Combine(dataDir, "通话记录.tsv");
+            settingsPath = Path.Combine(dataDir, "设置.ini");
+        }
+
+        private void ChangeDataDirectory(IWin32Window owner)
+        {
+            using (var dialog = new FolderBrowserDialog())
+            {
+                dialog.Description = "选择短信、通话记录和设置的保存位置";
+                dialog.SelectedPath = Directory.Exists(dataDir) ? dataDir : defaultDataDir;
+                dialog.ShowNewFolderButton = true;
+                if (dialog.ShowDialog(owner) != DialogResult.OK) return;
+
+                string selected = dialog.SelectedPath;
+                if (string.IsNullOrWhiteSpace(selected)) return;
+                dataDir = selected;
+                UpdateDataPaths();
+                SaveConfiguredDataDir();
+                SaveSettings();
+                SaveSmsRecords();
+                SaveCallRecords();
+                RefreshSmsList();
+                RefreshCallList();
+                statusLabel.Text = "数据保存位置已修改。";
+            }
         }
 
         private void LoadSettings()
@@ -885,6 +1268,16 @@ namespace Ec20PhoneTool
                 {
                     areaCodeBox.Text = NormalizeAreaCode(value);
                 }
+                else if (string.Equals(key, "AudioBridge", StringComparison.OrdinalIgnoreCase))
+                {
+                    audioBridgeEnabled = value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase);
+                }
+                else if (string.Equals(key, "DataDir", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(value))
+                {
+                    dataDir = value;
+                    UpdateDataPaths();
+                    SaveConfiguredDataDir();
+                }
             }
         }
 
@@ -892,8 +1285,13 @@ namespace Ec20PhoneTool
         {
             if (areaCodeBox == null) return;
             Directory.CreateDirectory(dataDir);
+            SaveConfiguredDataDir();
             areaCodeBox.Text = NormalizeAreaCode(areaCodeBox.Text);
-            File.WriteAllText(settingsPath, "AreaCode=" + areaCodeBox.Text + Environment.NewLine, Encoding.UTF8);
+            var lines = new List<string>();
+            lines.Add("AreaCode=" + areaCodeBox.Text);
+            lines.Add("AudioBridge=" + (audioBridgeEnabled ? "1" : "0"));
+            lines.Add("DataDir=" + dataDir);
+            File.WriteAllLines(settingsPath, lines.ToArray(), Encoding.UTF8);
         }
 
         private void LoadSmsRecords()
@@ -1148,8 +1546,8 @@ namespace Ec20PhoneTool
             if (foundAudio)
             {
                 message = "已检测到 AC Interface 音频设备。" + Environment.NewLine
-                    + "如果你已经把 AC Interface 麦克风和扬声器设置为默认通讯设备，EC20 通话通常会走这组设备。" + Environment.NewLine
-                    + "默认设备保持原来的扬声器/麦克风是正常的。";
+                    + "通话音频桥接：" + (audioBridgeEnabled ? "已开启" : "已关闭") + Environment.NewLine
+                    + "接通后会把 EC20 来电声音送到 Windows 默认播放设备，并把 Windows 默认录音设备送回 EC20。";
             }
             else
             {
@@ -1452,10 +1850,25 @@ namespace Ec20PhoneTool
 
         private void AutoRecoverNoService()
         {
-            if (!IsConnected || !simReady)
+            if (!IsConnected)
             {
                 noServiceTicks = 0;
                 recoveryStage = 0;
+                return;
+            }
+
+            if (!simReady)
+            {
+                noServiceTicks++;
+                if (noServiceTicks >= 30)
+                {
+                    noServiceTicks = 0;
+                    statusLabel.Text = "SIM卡不可用，正在等待 SIM 恢复。";
+                    SendCommandSilent("AT+CPIN?");
+                    SendCommandSilent("AT+QSIMDET=1,1");
+                    SendCommandSilent("AT+COPS=0");
+                    QueryStatusSilent();
+                }
                 return;
             }
 
@@ -1538,10 +1951,18 @@ namespace Ec20PhoneTool
             string number = Regex.Replace(rawNumber ?? "", @"[^\d+*#]", "");
             if (number.Length == 0) return "";
             if (number.StartsWith("+") || number.StartsWith("*") || number.StartsWith("#")) return number;
+            if (IsShortServiceNumber(number)) return number;
 
             string areaCode = NormalizeAreaCode(areaCodeBox == null ? "" : areaCodeBox.Text);
             if (areaCode.Length == 0) return number;
             return areaCode + number;
+        }
+
+        private bool IsShortServiceNumber(string number)
+        {
+            if (string.IsNullOrWhiteSpace(number)) return false;
+            if (!Regex.IsMatch(number, @"^\d+$")) return false;
+            return number.Length <= 6;
         }
 
         private string NormalizeAreaCode(string rawAreaCode)
@@ -1784,6 +2205,7 @@ namespace Ec20PhoneTool
 
         private void HangUpCall()
         {
+            StopAudioBridge();
             if (!IsConnected)
             {
                 MessageBox.Show("请先连接 EC20 的 AT 端口。", "未连接");
@@ -1800,7 +2222,10 @@ namespace Ec20PhoneTool
         private void SendCommandSilent(string command)
         {
             if (!IsConnected) return;
-            port.Write(command + "\r");
+            lock (serialCommandLock)
+            {
+                port.Write(command + "\r");
+            }
         }
 
         private void OnDataReceived(object sender, SerialDataReceivedEventArgs e)
@@ -1836,12 +2261,37 @@ namespace Ec20PhoneTool
             if (string.IsNullOrEmpty(text)) return;
             string upper = text.ToUpperInvariant();
 
-            if (upper.Contains("+CPIN: READY")) simReady = true;
+            if (upper.Contains("+CPIN: READY"))
+            {
+                if (!simReady)
+                {
+                    noServiceTicks = 0;
+                    recoveryStage = 0;
+                    networkSearching = true;
+                    statusLabel.Text = "SIM 已恢复，正在自动搜网。";
+                    SendCommandSilent("AT+COPS=0");
+                }
+                simReady = true;
+            }
+            else if (upper.Contains("SIM FAILURE")
+                || upper.Contains("SIM NOT INSERTED")
+                || upper.Contains("SIM REMOVED")
+                || upper.Contains("+CME ERROR: 10")
+                || upper.Contains("+CME ERROR: SIM"))
+            {
+                simReady = false;
+                networkReady = false;
+                networkSearching = false;
+                currentNetworkType = "";
+                recoveryStage = 0;
+            }
             else if (upper.Contains("+CPIN:"))
             {
                 simReady = false;
                 networkReady = false;
                 networkSearching = false;
+                currentNetworkType = "";
+                recoveryStage = 0;
             }
 
             if (upper.Contains("NO SERVICE") && !networkReady)
@@ -1888,11 +2338,13 @@ namespace Ec20PhoneTool
                 string network = qnwinfo.Groups[1].Value.ToUpperInvariant();
                 if (network.Length > 0 && network != "NO SERVICE" && network != "NONE")
                 {
+                    currentNetworkType = network;
                     networkReady = true;
                     networkSearching = false;
                 }
                 else if (!networkReady)
                 {
+                    currentNetworkType = "";
                     networkSearching = network != "NO SERVICE" && network != "NONE";
                 }
             }
@@ -2082,8 +2534,15 @@ namespace Ec20PhoneTool
                 ShowNotification("EC20 来电", "来电号码：" + number);
                 ShowCallPopup(number, true);
             }
-            else if (clccState == 0 && !string.IsNullOrEmpty(currentCallDirection) && !string.Equals(currentCallDirection, "拨出", StringComparison.OrdinalIgnoreCase))
+            else if (clccState == 0 && string.Equals(currentCallDirection, "拨出", StringComparison.OrdinalIgnoreCase))
             {
+                waitingForDialResult = false;
+                MarkCallActive();
+                if (callPopup != null) callPopup.SetActive();
+            }
+            else if (IsOutgoingCallActiveFromClcc(text))
+            {
+                waitingForDialResult = false;
                 MarkCallActive();
                 if (callPopup != null) callPopup.SetActive();
             }
@@ -2332,11 +2791,13 @@ namespace Ec20PhoneTool
         {
             if (string.IsNullOrEmpty(currentCallDirection)) StartCallHistory(lastCallerNumber, "通话");
             currentCallActive = true;
+            StartAudioBridge();
         }
 
         private void FinishCallHistory(string result)
         {
             if (string.IsNullOrEmpty(currentCallDirection)) return;
+            StopAudioBridge();
             int seconds = currentCallActive ? (int)Math.Max(0, (DateTime.Now - currentCallStartedAt).TotalSeconds) : 0;
             callRecords.Add(new CallRecord
             {
@@ -2352,6 +2813,44 @@ namespace Ec20PhoneTool
             currentCallNumber = "";
             currentCallDirection = "";
             currentCallActive = false;
+        }
+
+        private void StartAudioBridge()
+        {
+            if (!audioBridgeEnabled) return;
+            if (audioBridge != null && audioBridge.IsRunning) return;
+
+            try
+            {
+                if (audioBridge != null) audioBridge.Dispose();
+                audioBridge = Ec20AudioBridge.CreateDefault();
+                audioBridge.Start();
+                statusLabel.Text = "通话已接通，音频桥接已启动。";
+                Log("音频桥接已启动：" + audioBridge.Description);
+            }
+            catch (Exception ex)
+            {
+                statusLabel.Text = "通话已接通，但音频桥接启动失败。";
+                Log("音频桥接启动失败：" + ex.Message);
+                ShowNotification("EC20 音频桥接失败", ex.Message);
+            }
+        }
+
+        private void StopAudioBridge()
+        {
+            if (audioBridge == null) return;
+            try
+            {
+                audioBridge.Dispose();
+                Log("音频桥接已停止。");
+            }
+            catch
+            {
+            }
+            finally
+            {
+                audioBridge = null;
+            }
         }
 
         private string ExtractClipNumber(string text)
@@ -2378,6 +2877,44 @@ namespace Ec20PhoneTool
             if (!match.Success) return -1;
             int state;
             return int.TryParse(match.Groups[1].Value, out state) ? state : -1;
+        }
+
+        private bool IsOutgoingCallActiveFromClcc(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            if (!string.Equals(currentCallDirection, "拨出", StringComparison.OrdinalIgnoreCase)) return false;
+            if (!waitingForDialResult && !currentCallActive) return false;
+
+            foreach (Match match in Regex.Matches(text, @"\+CLCC:\s*\d+,(\d+),(\d+),\d+,\d+,""([^""]*)"""))
+            {
+                int direction;
+                int state;
+                if (!int.TryParse(match.Groups[1].Value, out direction)) continue;
+                if (!int.TryParse(match.Groups[2].Value, out state)) continue;
+
+                string number = match.Groups[3].Value;
+                if (direction != 0 || state != 0 || string.IsNullOrWhiteSpace(number)) continue;
+                if (!DialNumbersMatch(number, currentCallNumber)) continue;
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool DialNumbersMatch(string left, string right)
+        {
+            string a = Regex.Replace(left ?? "", @"[^\d+]", "");
+            string b = Regex.Replace(right ?? "", @"[^\d+]", "");
+            if (a.Length == 0 || b.Length == 0) return false;
+            if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase)) return true;
+
+            string ad = a.TrimStart('+');
+            string bd = b.TrimStart('+');
+            if (ad.Length >= 7 && bd.Length >= 7)
+            {
+                return ad.EndsWith(bd, StringComparison.OrdinalIgnoreCase) || bd.EndsWith(ad, StringComparison.OrdinalIgnoreCase);
+            }
+            return false;
         }
 
         private void ShowNotification(string title, string message)
@@ -2450,6 +2987,7 @@ namespace Ec20PhoneTool
             if (notifyIcon != null) notifyIcon.Dispose();
             if (showSignalTimer != null) showSignalTimer.Stop();
             if (showSignalEvent != null) showSignalEvent.Dispose();
+            StopAudioBridge();
             if (port != null && port.IsOpen) port.Close();
             base.OnFormClosing(e);
         }
@@ -2521,7 +3059,13 @@ namespace Ec20PhoneTool
 
         private void AppendLogText(string text)
         {
-            if (logBox == null || string.IsNullOrEmpty(text)) return;
+            if (string.IsNullOrEmpty(text)) return;
+            atLogBuffer.Append(text);
+            if (atLogBuffer.Length > 200000)
+            {
+                atLogBuffer.Remove(0, atLogBuffer.Length - 120000);
+            }
+            if (logBox == null) return;
             bool autoScroll = logAutoScrollBox == null || logAutoScrollBox.Checked;
             int selectionStart = logBox.SelectionStart;
             int selectionLength = logBox.SelectionLength;
@@ -2541,7 +3085,7 @@ namespace Ec20PhoneTool
 
         private void SaveAtLog()
         {
-            string logText = logBox == null ? "" : logBox.Text;
+            string logText = logBox == null ? atLogBuffer.ToString() : logBox.Text;
             if (string.IsNullOrWhiteSpace(logText))
             {
                 MessageBox.Show("当前还没有 AT 信令日志可保存。", "保存日志", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -2598,6 +3142,22 @@ namespace Ec20PhoneTool
         }
     }
 
+    public class MbnInfoRow
+    {
+        public string Name { get; set; }
+        public int State { get; set; }
+        public string StateText { get; set; }
+    }
+
+    public class ApnInfoRow
+    {
+        public int Cid { get; set; }
+        public string PdpType { get; set; }
+        public string Apn { get; set; }
+        public int State { get; set; }
+        public string StateText { get; set; }
+    }
+
     public class SmsRecord
     {
         public DateTime ReceivedAt { get; set; }
@@ -2626,6 +3186,385 @@ namespace Ec20PhoneTool
         public string Note { get; set; }
     }
 
+    public sealed class Ec20AudioBridge : IDisposable
+    {
+        private readonly int ec20InputDevice;
+        private readonly int pcInputDevice;
+        private readonly int ec20OutputDevice;
+        private readonly List<AudioPipe> pipes = new List<AudioPipe>();
+
+        private Ec20AudioBridge(int ec20InputDevice, int pcInputDevice, int ec20OutputDevice)
+        {
+            this.ec20InputDevice = ec20InputDevice;
+            this.pcInputDevice = pcInputDevice;
+            this.ec20OutputDevice = ec20OutputDevice;
+        }
+
+        public bool IsRunning { get; private set; }
+        public string Description { get; private set; }
+
+        public static Ec20AudioBridge CreateDefault()
+        {
+            int ec20Input = FindWaveInDevice("AC Interface", true);
+            int ec20Output = FindWaveOutDevice("AC Interface", true);
+            int pcInput = FindWaveInDevice("AC Interface", false);
+            return new Ec20AudioBridge(ec20Input, pcInput, ec20Output);
+        }
+
+        public void Start()
+        {
+            if (IsRunning) return;
+
+            int[] sampleRates = new[] { 16000, 8000 };
+            Exception lastError = null;
+            foreach (int sampleRate in sampleRates)
+            {
+                try
+                {
+                    DisposePipes();
+                    var downlink = new AudioPipe(ec20InputDevice, AudioPipe.WaveMapper, sampleRate, "EC20 到默认播放设备");
+                    var uplink = new AudioPipe(pcInputDevice, ec20OutputDevice, sampleRate, "默认录音设备到 EC20");
+                    pipes.Add(downlink);
+                    pipes.Add(uplink);
+                    downlink.Start();
+                    uplink.Start();
+                    IsRunning = true;
+                    Description = "采样率 " + sampleRate + "Hz";
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                    DisposePipes();
+                }
+            }
+
+            throw lastError ?? new InvalidOperationException("音频桥接启动失败。");
+        }
+
+        public void Dispose()
+        {
+            IsRunning = false;
+            DisposePipes();
+        }
+
+        private void DisposePipes()
+        {
+            foreach (AudioPipe pipe in pipes)
+            {
+                try { pipe.Dispose(); } catch { }
+            }
+            pipes.Clear();
+        }
+
+        private static int FindWaveInDevice(string keyword, bool mustContain)
+        {
+            int fallback = -1;
+            uint count = AudioPipe.waveInGetNumDevs();
+            for (uint i = 0; i < count; i++)
+            {
+                AudioPipe.WAVEINCAPS caps;
+                AudioPipe.waveInGetDevCaps(i, out caps, (uint)Marshal.SizeOf(typeof(AudioPipe.WAVEINCAPS)));
+                bool contains = caps.szPname.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0;
+                if (mustContain && contains) return (int)i;
+                if (!mustContain && !contains && fallback < 0) fallback = (int)i;
+            }
+
+            if (mustContain) throw new InvalidOperationException("没有找到 " + keyword + " 录音设备。");
+            return fallback >= 0 ? fallback : AudioPipe.WaveMapper;
+        }
+
+        private static int FindWaveOutDevice(string keyword, bool mustContain)
+        {
+            int fallback = -1;
+            uint count = AudioPipe.waveOutGetNumDevs();
+            for (uint i = 0; i < count; i++)
+            {
+                AudioPipe.WAVEOUTCAPS caps;
+                AudioPipe.waveOutGetDevCaps(i, out caps, (uint)Marshal.SizeOf(typeof(AudioPipe.WAVEOUTCAPS)));
+                bool contains = caps.szPname.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0;
+                if (mustContain && contains) return (int)i;
+                if (!mustContain && !contains && fallback < 0) fallback = (int)i;
+            }
+
+            if (mustContain) throw new InvalidOperationException("没有找到 " + keyword + " 播放设备。");
+            return fallback >= 0 ? fallback : AudioPipe.WaveMapper;
+        }
+
+        private sealed class AudioPipe : IDisposable
+        {
+            public const int WaveMapper = -1;
+            private const int CALLBACK_FUNCTION = 0x00030000;
+            private const int WIM_DATA = 0x3C0;
+            private const int BufferCount = 8;
+            private const int BufferMilliseconds = 60;
+
+            private readonly int inputDevice;
+            private readonly int outputDevice;
+            private readonly int sampleRate;
+            private readonly string name;
+            private readonly WaveInProc callback;
+            private readonly List<IntPtr> inputHeaders = new List<IntPtr>();
+            private readonly List<IntPtr> inputBuffers = new List<IntPtr>();
+            private readonly List<IntPtr> outputHeaders = new List<IntPtr>();
+            private readonly List<IntPtr> outputBuffers = new List<IntPtr>();
+            private IntPtr waveIn;
+            private IntPtr waveOut;
+            private bool running;
+
+            public AudioPipe(int inputDevice, int outputDevice, int sampleRate, string name)
+            {
+                this.inputDevice = inputDevice;
+                this.outputDevice = outputDevice;
+                this.sampleRate = sampleRate;
+                this.name = name;
+                callback = WaveInCallback;
+            }
+
+            public void Start()
+            {
+                WAVEFORMATEX format = CreateFormat(sampleRate);
+                Check(waveOutOpen(out waveOut, unchecked((uint)outputDevice), ref format, IntPtr.Zero, IntPtr.Zero, 0), name + " 输出打开失败");
+                Check(waveInOpen(out waveIn, unchecked((uint)inputDevice), ref format, callback, IntPtr.Zero, CALLBACK_FUNCTION), name + " 输入打开失败");
+
+                int bufferBytes = sampleRate * format.nBlockAlign * BufferMilliseconds / 1000;
+                for (int i = 0; i < BufferCount; i++)
+                {
+                    IntPtr buffer = Marshal.AllocHGlobal(bufferBytes);
+                    IntPtr headerPtr = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WAVEHDR)));
+                    WAVEHDR header = new WAVEHDR();
+                    header.lpData = buffer;
+                    header.dwBufferLength = bufferBytes;
+                    Marshal.StructureToPtr(header, headerPtr, false);
+                    Check(waveInPrepareHeader(waveIn, headerPtr, (uint)Marshal.SizeOf(typeof(WAVEHDR))), name + " 输入缓冲准备失败");
+                    Check(waveInAddBuffer(waveIn, headerPtr, (uint)Marshal.SizeOf(typeof(WAVEHDR))), name + " 输入缓冲加入失败");
+                    inputBuffers.Add(buffer);
+                    inputHeaders.Add(headerPtr);
+                }
+
+                running = true;
+                Check(waveInStart(waveIn), name + " 输入启动失败");
+            }
+
+            private static WAVEFORMATEX CreateFormat(int sampleRate)
+            {
+                WAVEFORMATEX format = new WAVEFORMATEX();
+                format.wFormatTag = 1;
+                format.nChannels = 1;
+                format.nSamplesPerSec = sampleRate;
+                format.wBitsPerSample = 16;
+                format.nBlockAlign = (short)(format.nChannels * format.wBitsPerSample / 8);
+                format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
+                format.cbSize = 0;
+                return format;
+            }
+
+            private void WaveInCallback(IntPtr hwi, int uMsg, IntPtr dwInstance, IntPtr dwParam1, IntPtr dwParam2)
+            {
+                if (!running || uMsg != WIM_DATA || dwParam1 == IntPtr.Zero) return;
+
+                try
+                {
+                    WAVEHDR inputHeader = (WAVEHDR)Marshal.PtrToStructure(dwParam1, typeof(WAVEHDR));
+                    if (inputHeader.dwBytesRecorded > 0)
+                    {
+                        QueueOutput(inputHeader.lpData, inputHeader.dwBytesRecorded);
+                    }
+                    waveInAddBuffer(waveIn, dwParam1, (uint)Marshal.SizeOf(typeof(WAVEHDR)));
+                }
+                catch
+                {
+                }
+            }
+
+            private void QueueOutput(IntPtr source, int bytes)
+            {
+                IntPtr outputBuffer = Marshal.AllocHGlobal(bytes);
+                byte[] data = new byte[bytes];
+                Marshal.Copy(source, data, 0, bytes);
+                Marshal.Copy(data, 0, outputBuffer, bytes);
+
+                IntPtr outputHeaderPtr = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WAVEHDR)));
+                WAVEHDR outputHeader = new WAVEHDR();
+                outputHeader.lpData = outputBuffer;
+                outputHeader.dwBufferLength = bytes;
+                Marshal.StructureToPtr(outputHeader, outputHeaderPtr, false);
+
+                waveOutPrepareHeader(waveOut, outputHeaderPtr, (uint)Marshal.SizeOf(typeof(WAVEHDR)));
+                waveOutWrite(waveOut, outputHeaderPtr, (uint)Marshal.SizeOf(typeof(WAVEHDR)));
+
+                lock (outputHeaders)
+                {
+                    outputHeaders.Add(outputHeaderPtr);
+                    outputBuffers.Add(outputBuffer);
+                    TrimOutputBuffers();
+                }
+            }
+
+            private void TrimOutputBuffers()
+            {
+                while (outputHeaders.Count > 300)
+                {
+                    IntPtr header = outputHeaders[0];
+                    IntPtr buffer = outputBuffers[0];
+                    outputHeaders.RemoveAt(0);
+                    outputBuffers.RemoveAt(0);
+                    waveOutUnprepareHeader(waveOut, header, (uint)Marshal.SizeOf(typeof(WAVEHDR)));
+                    Marshal.FreeHGlobal(header);
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+
+            public void Dispose()
+            {
+                running = false;
+                if (waveIn != IntPtr.Zero)
+                {
+                    waveInStop(waveIn);
+                    waveInReset(waveIn);
+                }
+                if (waveOut != IntPtr.Zero) waveOutReset(waveOut);
+
+                foreach (IntPtr header in inputHeaders)
+                {
+                    if (waveIn != IntPtr.Zero) waveInUnprepareHeader(waveIn, header, (uint)Marshal.SizeOf(typeof(WAVEHDR)));
+                    Marshal.FreeHGlobal(header);
+                }
+                foreach (IntPtr buffer in inputBuffers) Marshal.FreeHGlobal(buffer);
+
+                lock (outputHeaders)
+                {
+                    foreach (IntPtr header in outputHeaders)
+                    {
+                        if (waveOut != IntPtr.Zero) waveOutUnprepareHeader(waveOut, header, (uint)Marshal.SizeOf(typeof(WAVEHDR)));
+                        Marshal.FreeHGlobal(header);
+                    }
+                    foreach (IntPtr buffer in outputBuffers) Marshal.FreeHGlobal(buffer);
+                    outputHeaders.Clear();
+                    outputBuffers.Clear();
+                }
+
+                inputHeaders.Clear();
+                inputBuffers.Clear();
+                if (waveIn != IntPtr.Zero) waveInClose(waveIn);
+                if (waveOut != IntPtr.Zero) waveOutClose(waveOut);
+                waveIn = IntPtr.Zero;
+                waveOut = IntPtr.Zero;
+            }
+
+            private static void Check(uint result, string message)
+            {
+                if (result != 0) throw new InvalidOperationException(message + "（错误 " + result + "）");
+            }
+
+            private delegate void WaveInProc(IntPtr hwi, int uMsg, IntPtr dwInstance, IntPtr dwParam1, IntPtr dwParam2);
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct WAVEFORMATEX
+            {
+                public short wFormatTag;
+                public short nChannels;
+                public int nSamplesPerSec;
+                public int nAvgBytesPerSec;
+                public short nBlockAlign;
+                public short wBitsPerSample;
+                public short cbSize;
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct WAVEHDR
+            {
+                public IntPtr lpData;
+                public int dwBufferLength;
+                public int dwBytesRecorded;
+                public IntPtr dwUser;
+                public int dwFlags;
+                public int dwLoops;
+                public IntPtr lpNext;
+                public IntPtr reserved;
+            }
+
+            [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+            public struct WAVEINCAPS
+            {
+                public ushort wMid;
+                public ushort wPid;
+                public uint vDriverVersion;
+                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szPname;
+                public uint dwFormats;
+                public ushort wChannels;
+                public ushort wReserved1;
+            }
+
+            [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+            public struct WAVEOUTCAPS
+            {
+                public ushort wMid;
+                public ushort wPid;
+                public uint vDriverVersion;
+                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szPname;
+                public uint dwFormats;
+                public ushort wChannels;
+                public ushort wReserved1;
+                public uint dwSupport;
+            }
+
+            [DllImport("winmm.dll")]
+            public static extern uint waveInGetNumDevs();
+
+            [DllImport("winmm.dll", CharSet = CharSet.Auto)]
+            public static extern uint waveInGetDevCaps(uint uDeviceID, out WAVEINCAPS pwic, uint cbwic);
+
+            [DllImport("winmm.dll")]
+            public static extern uint waveOutGetNumDevs();
+
+            [DllImport("winmm.dll", CharSet = CharSet.Auto)]
+            public static extern uint waveOutGetDevCaps(uint uDeviceID, out WAVEOUTCAPS pwoc, uint cbwoc);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveInOpen(out IntPtr phwi, uint uDeviceID, ref WAVEFORMATEX pwfx, WaveInProc dwCallback, IntPtr dwInstance, int fdwOpen);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveInPrepareHeader(IntPtr hwi, IntPtr pwh, uint cbwh);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveInAddBuffer(IntPtr hwi, IntPtr pwh, uint cbwh);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveInStart(IntPtr hwi);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveInStop(IntPtr hwi);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveInReset(IntPtr hwi);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveInUnprepareHeader(IntPtr hwi, IntPtr pwh, uint cbwh);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveInClose(IntPtr hwi);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveOutOpen(out IntPtr phwo, uint uDeviceID, ref WAVEFORMATEX pwfx, IntPtr dwCallback, IntPtr dwInstance, int fdwOpen);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveOutPrepareHeader(IntPtr hwo, IntPtr pwh, uint cbwh);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveOutWrite(IntPtr hwo, IntPtr pwh, uint cbwh);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveOutReset(IntPtr hwo);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveOutUnprepareHeader(IntPtr hwo, IntPtr pwh, uint cbwh);
+
+            [DllImport("winmm.dll")]
+            private static extern uint waveOutClose(IntPtr hwo);
+        }
+    }
+
     public class CallPopupForm : Form
     {
         private readonly Action answerAction;
@@ -2641,6 +3580,7 @@ namespace Ec20PhoneTool
         private DateTime callStartTime;
         private bool active;
         private int callState;
+        private bool suppressCloseHangup;
 
         public CallPopupForm(Action answerAction, Action hangUpAction)
         {
@@ -2750,7 +3690,9 @@ namespace Ec20PhoneTool
         {
             durationTimer.Stop();
             active = false;
+            suppressCloseHangup = true;
             Hide();
+            suppressCloseHangup = false;
         }
 
         private void SetCallState(int state, string text)
@@ -2783,6 +3725,19 @@ namespace Ec20PhoneTool
             }
             TimeSpan elapsed = DateTime.Now - callStartTime;
             durationLabel.Text = "通话时长：" + ((int)elapsed.TotalMinutes).ToString("00") + ":" + elapsed.Seconds.ToString("00");
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (!suppressCloseHangup && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                hangUpAction();
+                Hide();
+                return;
+            }
+
+            base.OnFormClosing(e);
         }
     }
 }
