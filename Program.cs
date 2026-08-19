@@ -137,6 +137,7 @@ namespace Ec20PhoneTool
         private bool waitingForDialResult;
         private DateTime dialAttemptStartedAt;
         private DateTime commandQuietUntil;
+        private volatile bool directSerialReadActive;
         private const int MaxAutoConnectAttempts = 10;
         private const string StartupRunName = "EC20电话短信工具";
 
@@ -1483,9 +1484,113 @@ namespace Ec20PhoneTool
                 MessageBox.Show("请先连接 EC20 的 AT 端口。", "未连接");
                 return;
             }
+            if (directSerialReadActive)
+            {
+                MessageBox.Show("正在读取短信，请稍候。", "正在读取");
+                return;
+            }
             readingSms = true;
             statusLabel.Text = "正在读取短信。";
-            SendCommand("AT+CMGL=\"ALL\"");
+            commandQuietUntil = DateTime.Now.AddSeconds(12);
+            pollTimer.Stop();
+            directSerialReadActive = true;
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                var chunks = new List<SmsReadChunk>();
+                string error = "";
+                try
+                {
+                    SerialPort activePort = port;
+                    if (activePort == null || !activePort.IsOpen) throw new InvalidOperationException("EC20 AT 端口未连接。");
+                    activePort.DataReceived -= OnDataReceived;
+                    try
+                    {
+                        SendDirectCommand(activePort, "ATE0", 500);
+                        SendDirectCommand(activePort, "AT+CMEE=2", 500);
+                        SendDirectCommand(activePort, "AT+CMGF=1", 500);
+                        SendDirectCommand(activePort, "AT+CSCS=\"GSM\"", 500);
+                        ReadSmsFromStorage(activePort, chunks, "MT");
+                        ReadSmsFromStorage(activePort, chunks, "SM");
+                        ReadSmsFromStorage(activePort, chunks, "ME");
+                    }
+                    finally
+                    {
+                        activePort.DataReceived += OnDataReceived;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    error = ex.Message;
+                }
+
+                BeginInvoke((Action)(delegate
+                {
+                    directSerialReadActive = false;
+                    readingSms = false;
+                    if (IsConnected) pollTimer.Start();
+
+                    if (!string.IsNullOrEmpty(error))
+                    {
+                        statusLabel.Text = "短信读取失败：" + error;
+                        MessageBox.Show(error, "短信读取失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    int before = smsRecords.Count;
+                    foreach (var chunk in chunks)
+                    {
+                        Log(chunk.LogText);
+                        LogDecodedSmsLines(chunk.Text);
+                        ParseSmsList(chunk.Text, chunk.Storage);
+                    }
+                    MergeAdjacentSmsSegments();
+                    SaveSmsRecords();
+                    RefreshSmsList();
+                    int added = Math.Max(0, smsRecords.Count - before);
+                    statusLabel.Text = added > 0 ? "短信读取完成，新增 " + added + " 条。" : "短信读取完成，没有新的短信。";
+                }));
+            });
+        }
+
+        private void ReadSmsFromStorage(SerialPort activePort, List<SmsReadChunk> chunks, string storage)
+        {
+            string cpms = SendDirectCommand(activePort, "AT+CPMS=\"" + storage + "\",\"" + storage + "\",\"" + storage + "\"", 1200);
+            chunks.Add(new SmsReadChunk { Storage = storage, Text = cpms, LogText = ">> AT+CPMS=\"" + storage + "\",\"" + storage + "\",\"" + storage + "\"" + Environment.NewLine + cpms.TrimEnd() });
+            if (ContainsAtError(cpms)) return;
+
+            string cmgl = SendDirectCommand(activePort, "AT+CMGL=\"ALL\"", 5000);
+            chunks.Add(new SmsReadChunk { Storage = storage, Text = cmgl, LogText = ">> AT+CMGL=\"ALL\" [" + storage + "]" + Environment.NewLine + cmgl.TrimEnd() });
+        }
+
+        private string SendDirectCommand(SerialPort activePort, string command, int waitMs)
+        {
+            activePort.DiscardInBuffer();
+            activePort.Write(command + "\r");
+            Thread.Sleep(waitMs);
+            string response = activePort.ReadExisting().Replace("\0", "");
+            int quietLoops = 0;
+            while (quietLoops < 4 && !ContainsFinalAtResult(response))
+            {
+                Thread.Sleep(250);
+                string more = activePort.ReadExisting().Replace("\0", "");
+                if (more.Length == 0) quietLoops++;
+                else
+                {
+                    response += more;
+                    quietLoops = 0;
+                }
+            }
+            return response;
+        }
+
+        private bool ContainsFinalAtResult(string text)
+        {
+            string normalized = "\n" + (text ?? "").Replace("\r", "") + "\n";
+            return normalized.Contains("\nOK\n")
+                || normalized.Contains("\nERROR\n")
+                || normalized.Contains("\n+CME ERROR")
+                || normalized.Contains("\n+CMS ERROR");
         }
 
         private void SendCommand(string command)
@@ -1585,6 +1690,7 @@ namespace Ec20PhoneTool
         {
             try
             {
+                if (directSerialReadActive) return;
                 string text = port.ReadExisting().Replace("\0", "");
                 BeginInvoke((Action)(delegate
                 {
@@ -1884,6 +1990,11 @@ namespace Ec20PhoneTool
 
         private void ParseSmsList(string text)
         {
+            ParseSmsList(text, "EC20");
+        }
+
+        private void ParseSmsList(string text, string storage)
+        {
             string normalized = text.Replace("\r", "");
             var matches = Regex.Matches(normalized, @"\+CMGL:\s*(\d+),""([^""]*)"",""([^""]*)"",[^,\n]*(?:,""([^""]*)"")?[^\n]*\n(.*?)(?=\n\+CMGL:|\nOK|\nERROR|\n\+CME ERROR|\n\+CMS ERROR|\z)", RegexOptions.Singleline);
             foreach (Match match in matches)
@@ -1897,7 +2008,7 @@ namespace Ec20PhoneTool
                 string decoded = TryDecodeUcs2(body);
                 if (!string.IsNullOrWhiteSpace(decoded)) body = decoded;
                 DateTime receivedAt = ParseModemTime(timeText);
-                AddSmsRecord(status.Contains("UNSENT") || status.Contains("SENT") ? "发出" : "收到", number, body, modemIndex, "EC20", receivedAt);
+                AddSmsRecord(status.Contains("UNSENT") || status.Contains("SENT") ? "发出" : "收到", number, body, modemIndex, storage, receivedAt);
             }
             if (matches.Count > 0)
             {
@@ -2308,6 +2419,13 @@ namespace Ec20PhoneTool
         public int ModemIndex { get; set; }
         public string Storage { get; set; }
         public string SegmentIndexes { get; set; }
+    }
+
+    public class SmsReadChunk
+    {
+        public string Storage { get; set; }
+        public string Text { get; set; }
+        public string LogText { get; set; }
     }
 
     public class CallRecord
