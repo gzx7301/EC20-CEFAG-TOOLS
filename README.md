@@ -44,12 +44,35 @@ EC20-CEFAG-TOOLS 是一个用于 Windows 的 Quectel EC20 CEFAG 电话 / 短信�
 bin\Release\EC20电话短信工具.exe
 ```
 
+## 测试设备
+
+本工具当前主要在以下设备上测试：
+
+```text
+型号：Quectel EC20F
+固件版本：EC20CEFAGR06A16M4G
+```
+
 ## 数据保存位置
 
 短信记录和通话记录默认保存在当前 Windows 用户的本地应用数据目录：
 
 ```text
 %LOCALAPPDATA%\EC20电话短信工具
+```
+
+可以在工具的“设置”里点击“修改路径”改为其他目录。自定义目录会写入注册表：
+
+```text
+HKEY_CURRENT_USER\Software\EC20PhoneTool
+值名：DataDir
+```
+
+开机自启使用的注册表位置是：
+
+```text
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
+值名：EC20PhoneTool
 ```
 
 AT 信令日志点击保存后会保存在程序 exe 所在目录。

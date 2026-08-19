@@ -125,6 +125,7 @@ namespace Ec20PhoneTool
         private int volteDisableState = -1;
         private int imsRegisteredState = -1;
         private string currentMbn = "未知";
+        private string firmwareVersion = "未知";
         private bool updatingVolteSwitch;
         private bool readingSms;
         private int noServiceTicks;
@@ -156,8 +157,10 @@ namespace Ec20PhoneTool
         private readonly HashSet<string> smsIndexKeys = new HashSet<string>();
         private readonly HashSet<string> smsContentKeys = new HashSet<string>();
         private const int MaxAutoConnectAttempts = 10;
-        private const string StartupRunName = "EC20电话短信工具";
-        private const string AppRegistryKey = @"Software\EC20电话短信工具";
+        private const string StartupRunName = "EC20PhoneTool";
+        private const string LegacyStartupRunName = "EC20电话短信工具";
+        private const string AppRegistryKey = @"Software\EC20PhoneTool";
+        private const string LegacyAppRegistryKey = @"Software\EC20电话短信工具";
 
         public MainForm(bool startHidden)
         {
@@ -409,19 +412,20 @@ namespace Ec20PhoneTool
             var form = new Form();
             form.Text = "设置";
             form.Width = 520;
-            form.Height = 350;
-            form.MinimumSize = new Size(500, 330);
+            form.Height = 390;
+            form.MinimumSize = new Size(500, 370);
             form.StartPosition = FormStartPosition.CenterParent;
             form.Font = Font;
 
             var root = new TableLayoutPanel();
             root.Dock = DockStyle.Fill;
             root.Padding = new Padding(14);
-            root.RowCount = 6;
+            root.RowCount = 7;
             root.ColumnCount = 1;
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -486,8 +490,11 @@ namespace Ec20PhoneTool
             var mbnLabel = new Label { Text = "当前 MBN：" + (string.IsNullOrWhiteSpace(currentMbn) ? "未知" : currentMbn), Dock = DockStyle.Fill, AutoSize = false, Padding = new Padding(0, 8, 0, 0) };
             root.Controls.Add(mbnLabel, 0, 3);
 
+            var firmwareLabel = new Label { Text = "固件版本:" + (string.IsNullOrWhiteSpace(firmwareVersion) ? "未知" : firmwareVersion), Dock = DockStyle.Fill, AutoSize = false, Padding = new Padding(0, 8, 0, 0) };
+            root.Controls.Add(firmwareLabel, 0, 4);
+
             var dataPathRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-            root.Controls.Add(dataPathRow, 0, 4);
+            root.Controls.Add(dataPathRow, 0, 5);
             var dataPathLabel = new Label { Text = "数据位置：" + dataDir, AutoSize = false, Width = 350, Height = 32, Padding = new Padding(0, 8, 0, 0) };
             dataPathRow.Controls.Add(dataPathLabel);
             var changeDataPathButton = new Button { Text = "修改路径", Width = 90, Height = 32 };
@@ -499,7 +506,7 @@ namespace Ec20PhoneTool
             dataPathRow.Controls.Add(changeDataPathButton);
 
             var bottomRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
-            root.Controls.Add(bottomRow, 0, 5);
+            root.Controls.Add(bottomRow, 0, 6);
             var saveButton = new Button { Text = "保存", Width = 90, Height = 32 };
             saveButton.Click += delegate
             {
@@ -1101,6 +1108,10 @@ namespace Ec20PhoneTool
             var lines = new List<string>();
             lines.Add("端口：" + targetPort.PortName);
 
+            string ati = SendCommandAndRead(targetPort, "ATI", 900);
+            ParseFirmwareVersionFromText(ati);
+            if (!string.IsNullOrWhiteSpace(firmwareVersion) && firmwareVersion != "未知") lines.Add("固件版本：" + firmwareVersion);
+
             string cpin = SendCommandAndRead(targetPort, "AT+CPIN?", 900);
             if (cpin.Contains("READY")) lines.Add("SIM：已就绪");
             else if (cpin.Contains("+CPIN:")) lines.Add("SIM：" + OneLine(cpin));
@@ -1139,6 +1150,13 @@ namespace Ec20PhoneTool
             UpdateConnectionIndicators(IsConnected || targetPort.IsOpen, lastSignal);
 
             return string.Join(Environment.NewLine, lines.ToArray());
+        }
+
+        private void ParseFirmwareVersionFromText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            var match = Regex.Match(text, @"Revision:\s*([^\r\n]+)", RegexOptions.IgnoreCase);
+            if (match.Success) firmwareVersion = match.Groups[1].Value.Trim();
         }
 
         private string OneLine(string text)
@@ -1208,6 +1226,22 @@ namespace Ec20PhoneTool
             catch
             {
             }
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(LegacyAppRegistryKey, false))
+                {
+                    string value = key == null ? "" : Convert.ToString(key.GetValue("DataDir"));
+                    if (!string.IsNullOrWhiteSpace(value))
+                    {
+                        dataDir = value;
+                        SaveConfiguredDataDir();
+                        return value;
+                    }
+                }
+            }
+            catch
+            {
+            }
             return defaultDataDir;
         }
 
@@ -1219,6 +1253,7 @@ namespace Ec20PhoneTool
                 {
                     key.SetValue("DataDir", dataDir);
                 }
+                Registry.CurrentUser.DeleteSubKeyTree(LegacyAppRegistryKey, false);
             }
             catch
             {
@@ -1709,6 +1744,7 @@ namespace Ec20PhoneTool
         private void InitializeModem()
         {
             SendCommandSilent("ATE0");
+            SendCommandSilent("ATI");
             SendCommandSilent("AT+CMEE=2");
             SendCommandSilent("AT+CMGF=1");
             SendCommandSilent("AT+CSCS=\"GSM\"");
@@ -2139,7 +2175,10 @@ namespace Ec20PhoneTool
                 return;
             }
             Log(">> " + command);
-            port.Write(command + "\r");
+            lock (serialCommandLock)
+            {
+                port.Write(command + "\r");
+            }
         }
 
         private void SendAtCommandFromBox()
@@ -2238,6 +2277,7 @@ namespace Ec20PhoneTool
                 {
                     Log(text);
                     AppendAndParseSerialText(text);
+                    ParseFirmwareVersionFromText(text);
                     ParseServiceStatusFromText(text);
                     ParseVolteStatusFromText(text);
                     ParseMbnStatusFromText(text);
@@ -3017,7 +3057,8 @@ namespace Ec20PhoneTool
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", false))
             {
                 string value = key == null ? "" : Convert.ToString(key.GetValue(StartupRunName));
-                return !string.IsNullOrEmpty(value);
+                string legacyValue = key == null ? "" : Convert.ToString(key.GetValue(LegacyStartupRunName));
+                return !string.IsNullOrEmpty(value) || !string.IsNullOrEmpty(legacyValue);
             }
         }
 
@@ -3028,6 +3069,7 @@ namespace Ec20PhoneTool
             using (RegistryKey key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
             {
                 key.SetValue(StartupRunName, value);
+                key.DeleteValue(LegacyStartupRunName, false);
             }
         }
 
@@ -3036,6 +3078,7 @@ namespace Ec20PhoneTool
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
             {
                 if (key != null) key.DeleteValue(StartupRunName, false);
+                if (key != null) key.DeleteValue(LegacyStartupRunName, false);
             }
         }
 
