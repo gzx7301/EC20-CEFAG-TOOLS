@@ -411,9 +411,9 @@ namespace Ec20PhoneTool
         {
             var form = new Form();
             form.Text = "设置";
-            form.Width = 520;
+            form.Width = 700;
             form.Height = 390;
-            form.MinimumSize = new Size(500, 370);
+            form.MinimumSize = new Size(660, 370);
             form.StartPosition = FormStartPosition.CenterParent;
             form.Font = Font;
 
@@ -458,7 +458,7 @@ namespace Ec20PhoneTool
             };
             portRow.Controls.Add(connectDialogButton);
 
-            var actionRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+            var actionRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true, AutoScroll = false };
             root.Controls.Add(actionRow, 0, 1);
             var audioButton = new Button { Text = "音频检查", Width = 90, Height = 32 };
             audioButton.Click += delegate { CheckAudioDevices(); };
