@@ -2338,7 +2338,7 @@ namespace Ec20PhoneTool
             }
             catch (Exception ex)
             {
-                if (IsPortBusyError(ex) || ex is IOException || ex is InvalidOperationException)
+                if (IsPortBusyError(ex) || ex is IOException || ex is InvalidOperationException || ex is TimeoutException)
                 {
                     StartReconnectAfterPortLoss("EC20 已断开或端口暂时不可用，正在重新寻找。");
                 }
@@ -2354,6 +2354,7 @@ namespace Ec20PhoneTool
             if (ex == null) return false;
             return ex is UnauthorizedAccessException
                 || ex is IOException
+                || ex is TimeoutException
                 || (ex.Message != null && (ex.Message.Contains("正在使用") || ex.Message.Contains("不存在") || ex.Message.Contains("access") || ex.Message.Contains("denied")));
         }
 
@@ -2782,9 +2783,30 @@ namespace Ec20PhoneTool
         private void SendCommandSilent(string command)
         {
             if (!IsConnected) return;
-            lock (serialCommandLock)
+            try
             {
-                port.Write(command + "\r");
+                lock (serialCommandLock)
+                {
+                    if (!IsConnected || port == null || !port.IsOpen) return;
+                    port.Write(command + "\r");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (IsPortBusyError(ex) || ex is InvalidOperationException)
+                {
+                    BeginInvoke((Action)(delegate
+                    {
+                        if (IsConnected)
+                        {
+                            StartReconnectAfterPortLoss("EC20 串口写入超时或暂时不可用，正在重新寻找。");
+                        }
+                    }));
+                }
+                else
+                {
+                    Log("发送 AT 指令失败：" + ex.Message);
+                }
             }
         }
 
