@@ -1,6 +1,6 @@
-# EC20-CEFAG-TOOLS
+# EC20-CE-FAG-Tools
 
-EC20-CEFAG-TOOLS 是一个用于 Windows 的 Quectel EC20 CEFAG 电话 / 短信小工具。
+EC20-CE-FAG-Tools 是一个用于 Windows 的 Quectel EC20 CEFAG 电话 / 短信小工具。
 
 它通过 EC20 的 AT 串口工作，支持托盘后台运行、自动连接、短信收发、拨号、来电提醒、通话记录、VoLTE 状态显示、MBN/APN 查看，以及基于 Windows 音频设备的通话音频桥接。
 
@@ -17,6 +17,7 @@ EC20-CEFAG-TOOLS 是一个用于 Windows 的 Quectel EC20 CEFAG 电话 / 短信�
 - 支持手动重新搜网。
 - 设置页显示当前 MBN 和固件版本。
 - 支持查看 MBN/APN 信息，MBN 与 APN 分两列显示，并用颜色标出激活、未知和未激活状态。
+- 支持在设置页切换 EC20 USB 网卡模式，包括 RMNET/QMI、ECM、MBIM、RNDIS。
 - 支持查看 VoLTE 状态，并提供 VoLTE 开关。
 - VoLTE 关闭时显示 `VoLTE关闭`；打开但未注册时显示 `VoLTE注册中`；可用时显示 `VoLTE可用`。
 - SIM 卡不可用时隐藏 VoLTE 状态和开关，避免误读状态。
@@ -71,6 +72,18 @@ EC20-CEFAG-TOOLS 是一个用于 Windows 的 Quectel EC20 CEFAG 电话 / 短信�
   - 黄色：未知。
   - 灰色：未激活。
 
+## USB 网卡模式
+
+- 入口在 `设置` -> `USB网络模式`。
+- 打开后会先读取当前 `AT+QCFG="usbnet"` 配置，并默认选中当前模式。
+- 支持切换：
+  - `0`：RMNET / QMI。
+  - `1`：ECM。
+  - `2`：MBIM。
+  - `3`：RNDIS。
+- 点击 `保存并重启` 后，会写入 `AT+QCFG="usbnet",<模式>` 并重启模块。
+- USB 网卡模式变化会导致 EC20 重新枚举，Windows 中对应的网卡设备可能会断开并重新出现。
+
 ## 使用前准备
 
 1. 安装 EC20 对应的 Windows 驱动。
@@ -92,7 +105,7 @@ EC20-CEFAG-TOOLS 是一个用于 Windows 的 Quectel EC20 CEFAG 电话 / 短信�
 构建后的 exe 会输出到：
 
 ```text
-bin\Release\EC20电话短信工具.exe
+bin\Release\EC20-CE-FAG-Tools.exe
 ```
 
 ## 测试设备
@@ -112,13 +125,13 @@ ATI 返回型号：Quectel EC20F
 短信记录、通话记录和设置默认保存在当前 Windows 用户的本地应用数据目录：
 
 ```text
-%LOCALAPPDATA%\EC20电话短信工具
+%LOCALAPPDATA%\EC20-CE-FAG-Tools
 ```
 
 可以在工具的 `设置` 里点击 `修改路径` 改为其他目录。自定义目录会写入注册表：
 
 ```text
-HKEY_CURRENT_USER\Software\EC20PhoneTool
+HKEY_CURRENT_USER\Software\EC20-CE-FAG-Tools
 值名：DataDir
 ```
 
@@ -126,8 +139,10 @@ HKEY_CURRENT_USER\Software\EC20PhoneTool
 
 ```text
 HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
-值名：EC20PhoneTool
+值名：EC20-CE-FAG-Tools
 ```
+
+旧版本曾使用过 `%LOCALAPPDATA%\EC20电话短信工具`、`HKEY_CURRENT_USER\Software\EC20PhoneTool` 和 `HKEY_CURRENT_USER\Software\EC20电话短信工具`。新版只会迁移这些明确属于本工具的旧位置，不会扫描 `EC20*` 或迁移其他软件的数据。迁移旧数据目录后，会在旧位置留下同名快捷方式，指向新的数据目录。
 
 ## 已知限制
 

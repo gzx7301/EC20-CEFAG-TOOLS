@@ -6,7 +6,7 @@
     <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
     <OutputType>WinExe</OutputType>
     <RootNamespace>Ec20PhoneTool</RootNamespace>
-    <AssemblyName>EC20电话短信工具</AssemblyName>
+    <AssemblyName>EC20-CE-FAG-Tools</AssemblyName>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <LangVersion>5</LangVersion>

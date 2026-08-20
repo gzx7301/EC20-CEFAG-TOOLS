@@ -157,23 +157,28 @@ namespace Ec20PhoneTool
         private readonly HashSet<string> smsIndexKeys = new HashSet<string>();
         private readonly HashSet<string> smsContentKeys = new HashSet<string>();
         private const int MaxAutoConnectAttempts = 10;
-        private const string StartupRunName = "EC20PhoneTool";
+        private const string AppDisplayName = "EC20-CE-FAG-Tools";
+        private const string StartupRunName = "EC20-CE-FAG-Tools";
+        private const string LegacyEnglishStartupRunName = "EC20PhoneTool";
         private const string LegacyStartupRunName = "EC20电话短信工具";
-        private const string AppRegistryKey = @"Software\EC20PhoneTool";
+        private const string AppRegistryKey = @"Software\EC20-CE-FAG-Tools";
+        private const string LegacyEnglishAppRegistryKey = @"Software\EC20PhoneTool";
         private const string LegacyAppRegistryKey = @"Software\EC20电话短信工具";
+        private const string LegacyDataDirName = "EC20电话短信工具";
 
         public MainForm(bool startHidden)
         {
             this.startHidden = startHidden;
-            Text = "EC20 电话短信工具";
+            Text = AppDisplayName;
             Width = 900;
             Height = 680;
             MinimumSize = new Size(760, 560);
             Font = new Font("Segoe UI", 10f);
-            defaultDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EC20电话短信工具");
+            defaultDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppDisplayName);
             dataDir = LoadConfiguredDataDir();
             UpdateDataPaths();
             BuildUi();
+            MigrateStartupRegistration();
             LoadLocalData();
             RefreshPorts();
             pollTimer = new System.Windows.Forms.Timer();
@@ -377,7 +382,7 @@ namespace Ec20PhoneTool
 
             notifyIcon = new NotifyIcon();
             notifyIcon.Icon = SystemIcons.Application;
-            notifyIcon.Text = "EC20 电话短信工具";
+            notifyIcon.Text = AppDisplayName;
             notifyIcon.Visible = true;
             var trayMenu = new ContextMenuStrip();
             trayMenu.Items.Add("打开主界面", null, delegate { ShowMainWindow(); });
@@ -475,6 +480,9 @@ namespace Ec20PhoneTool
             var mbnApnButton = new Button { Text = "MBN/APN信息", Width = 110, Height = 32 };
             mbnApnButton.Click += delegate { ShowMbnApnWindow(); };
             actionRow.Controls.Add(mbnApnButton);
+            var networkModeButton = new Button { Text = "USB网络模式", Width = 110, Height = 32 };
+            networkModeButton.Click += delegate { ShowNetworkModeWindow(); };
+            actionRow.Controls.Add(networkModeButton);
 
             var checkRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
             root.Controls.Add(checkRow, 0, 2);
@@ -524,6 +532,161 @@ namespace Ec20PhoneTool
 
             form.ShowDialog(this);
             form.Dispose();
+        }
+
+        private void ShowNetworkModeWindow()
+        {
+            if (!IsConnected)
+            {
+                MessageBox.Show("请先连接 EC20 的 AT 端口。", "未连接", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            int currentMode = QueryUsbNetworkMode();
+
+            var form = new Form();
+            form.Text = "EC20 USB网络模式";
+            form.Width = 430;
+            form.Height = 360;
+            form.MinimumSize = new Size(380, 300);
+            form.StartPosition = FormStartPosition.CenterParent;
+            form.Font = Font;
+
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 1, RowCount = 3 };
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+            form.Controls.Add(root);
+
+            var currentLabel = new Label
+            {
+                Text = "当前模式：" + FormatUsbNetworkMode(currentMode),
+                Dock = DockStyle.Fill,
+                AutoSize = false,
+                Padding = new Padding(0, 7, 0, 0)
+            };
+            root.Controls.Add(currentLabel, 0, 0);
+
+            var modePanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+            root.Controls.Add(modePanel, 0, 1);
+
+            var rmnetButton = AddNetworkModeRadio(modePanel, "RMNET / QMI", 0, currentMode);
+            AddNetworkModeRadio(modePanel, "ECM", 1, currentMode);
+            AddNetworkModeRadio(modePanel, "MBIM", 2, currentMode);
+            AddNetworkModeRadio(modePanel, "RNDIS", 3, currentMode);
+            if (currentMode < 0) rmnetButton.Checked = false;
+
+            var bottomRow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
+            root.Controls.Add(bottomRow, 0, 2);
+            var saveButton = new Button { Text = "保存并重启", Width = 110, Height = 32 };
+            saveButton.Click += delegate
+            {
+                int selectedMode = 0;
+                foreach (Control control in modePanel.Controls)
+                {
+                    var radio = control as RadioButton;
+                    if (radio != null && radio.Checked)
+                    {
+                        selectedMode = (int)radio.Tag;
+                        break;
+                    }
+                }
+
+                bool hasSelection = false;
+                foreach (Control control in modePanel.Controls)
+                {
+                    var radio = control as RadioButton;
+                    if (radio != null && radio.Checked)
+                    {
+                        hasSelection = true;
+                        break;
+                    }
+                }
+                if (!hasSelection)
+                {
+                    MessageBox.Show("没有读取到当前 USB 网络模式，请手动选择一个模式后再保存。", "请选择模式", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                saveButton.Enabled = false;
+                statusLabel.Text = "正在保存 USB 网络模式并重启 EC20。";
+                SaveUsbNetworkModeAndRestart(selectedMode, form);
+            };
+            bottomRow.Controls.Add(saveButton);
+
+            form.Show(this);
+        }
+
+        private RadioButton AddNetworkModeRadio(Control parent, string text, int value, int currentMode)
+        {
+            var button = new RadioButton
+            {
+                Text = text,
+                Tag = value,
+                Checked = currentMode == value,
+                AutoSize = true,
+                Padding = new Padding(0, 8, 0, 0)
+            };
+            parent.Controls.Add(button);
+            return button;
+        }
+
+        private int QueryUsbNetworkMode()
+        {
+            try
+            {
+                string text = SendCommandAndRead(port, "AT+QCFG=\"usbnet\"", 1200);
+                Log(">> AT+QCFG=\"usbnet\"" + Environment.NewLine + text.TrimEnd());
+                Match match = Regex.Match(text, @"\+QCFG:\s*(?:""usbnet""\s*,)?\s*(\d+)", RegexOptions.IgnoreCase);
+                int mode;
+                if (match.Success && int.TryParse(match.Groups[1].Value, out mode) && mode >= 0 && mode <= 3) return mode;
+            }
+            catch
+            {
+            }
+            return -1;
+        }
+
+        private string FormatUsbNetworkMode(int mode)
+        {
+            if (mode == 0) return "RMNET / QMI";
+            if (mode == 1) return "ECM";
+            if (mode == 2) return "MBIM";
+            if (mode == 3) return "RNDIS";
+            return "读取失败";
+        }
+
+        private void SaveUsbNetworkModeAndRestart(int mode, Form owner)
+        {
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    SendCommandSilent("AT+QCFG=\"usbnet\"," + mode);
+                    Thread.Sleep(800);
+                    SendCommandSilent("AT+CFUN=1,1");
+                    Thread.Sleep(1500);
+                    BeginInvoke((Action)(delegate
+                    {
+                        if (owner != null && !owner.IsDisposed) owner.Close();
+                        RestartAutoConnect();
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        BeginInvoke((Action)(delegate
+                        {
+                            statusLabel.Text = "USB 网络模式保存失败。";
+                            MessageBox.Show(ex.Message, "USB 网络模式保存失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }));
+                    }
+                    catch
+                    {
+                    }
+                }
+            });
         }
 
         private void ShowAtLogWindow()
@@ -731,11 +894,15 @@ namespace Ec20PhoneTool
                 string apnText = SendCommandAndRead(port, "AT+CGDCONT?", 1800);
                 string cgactText = SendCommandAndRead(port, "AT+CGACT?", 1400);
                 string qiactText = SendCommandAndRead(port, "AT+QIACT?", 1400);
+                string cgpaddrText = SendCommandAndRead(port, "AT+CGPADDR", 1400);
+                string qicsgpText = QueryQicsgpInfo();
 
                 Log(">> AT+QMBNCFG=\"List\"" + Environment.NewLine + mbnText.TrimEnd());
                 Log(">> AT+CGDCONT?" + Environment.NewLine + apnText.TrimEnd());
                 Log(">> AT+CGACT?" + Environment.NewLine + cgactText.TrimEnd());
                 Log(">> AT+QIACT?" + Environment.NewLine + qiactText.TrimEnd());
+                Log(">> AT+CGPADDR" + Environment.NewLine + cgpaddrText.TrimEnd());
+                Log(qicsgpText.TrimEnd());
 
                 mbnRows.AddRange(ParseMbnRows(mbnText));
                 ParseMbnStatusFromRows(mbnRows);
@@ -765,32 +932,17 @@ namespace Ec20PhoneTool
                         activeCids.Add(cid);
                     }
                 }
-
-                foreach (Match match in Regex.Matches(apnText, @"\+CGDCONT:\s*(\d+),\s*""([^""]*)"",\s*""([^""]*)"""))
+                foreach (Match match in Regex.Matches(cgpaddrText, @"\+CGPADDR:\s*(\d+)\s*,\s*(""?[^,\r\n""]+""?)", RegexOptions.IgnoreCase))
                 {
                     int cid;
-                    if (!int.TryParse(match.Groups[1].Value, out cid)) continue;
-                    var row = new ApnInfoRow();
-                    row.Cid = cid;
-                    row.PdpType = match.Groups[2].Value;
-                    row.Apn = match.Groups[3].Value;
-                    if (!apnActivationKnown)
+                    if (int.TryParse(match.Groups[1].Value, out cid) && HasUsableAddress(match.Groups[2].Value))
                     {
-                        row.State = 1;
-                        row.StateText = "未知";
+                        apnActivationKnown = true;
+                        activeCids.Add(cid);
                     }
-                    else if (activeCids.Contains(cid))
-                    {
-                        row.State = 2;
-                        row.StateText = "激活";
-                    }
-                    else
-                    {
-                        row.State = 0;
-                        row.StateText = "未激活";
-                    }
-                    apnRows.Add(row);
                 }
+
+                apnRows.AddRange(FilterApnRowsForActiveMbn(ParseApnRows(apnText, qicsgpText, activeCids, apnActivationKnown), currentMbn));
                 if (apnRows.Count == 0)
                 {
                     apnRows.Add(new ApnInfoRow { Cid = 0, PdpType = "", Apn = "未读取到 APN 信息", State = 1, StateText = "未知" });
@@ -799,6 +951,186 @@ namespace Ec20PhoneTool
             finally
             {
             }
+        }
+
+        private bool HasUsableAddress(string value)
+        {
+            string address = (value ?? "").Trim().Trim('"');
+            if (address.Length == 0) return false;
+            if (address == "0.0.0.0" || address == "::" || address == "0:0:0:0:0:0:0:0") return false;
+            return true;
+        }
+
+        private string QueryQicsgpInfo()
+        {
+            var builder = new StringBuilder();
+            for (int cid = 1; cid <= 6; cid++)
+            {
+                string command = "AT+QICSGP=" + cid;
+                string text = SendCommandAndRead(port, command, 550);
+                builder.AppendLine(">> " + command);
+                builder.AppendLine(text.TrimEnd());
+                if (ContainsAtError(text) && cid > 3) break;
+            }
+            return builder.ToString();
+        }
+
+        private List<ApnInfoRow> ParseApnRows(string cgdcText, string qicsgpText, HashSet<int> activeCids, bool apnActivationKnown)
+        {
+            var byCid = new SortedDictionary<int, ApnInfoRow>();
+
+            foreach (Match match in Regex.Matches(cgdcText ?? "", @"\+CGDCONT:\s*(\d+)\s*,\s*""([^""]*)""\s*,\s*""([^""]*)""", RegexOptions.IgnoreCase))
+            {
+                int cid;
+                if (!int.TryParse(match.Groups[1].Value, out cid)) continue;
+                var row = GetOrCreateApnRow(byCid, cid);
+                row.PdpType = match.Groups[2].Value;
+                row.Apn = match.Groups[3].Value;
+            }
+
+            ParseQicsgpRows(qicsgpText, byCid);
+
+            foreach (ApnInfoRow row in byCid.Values)
+            {
+                ApplyApnState(row, activeCids, apnActivationKnown);
+            }
+
+            return new List<ApnInfoRow>(byCid.Values);
+        }
+
+        private List<ApnInfoRow> FilterApnRowsForActiveMbn(List<ApnInfoRow> rows, string activeMbn)
+        {
+            var configuredRows = new List<ApnInfoRow>();
+            foreach (ApnInfoRow row in rows)
+            {
+                if (!string.IsNullOrWhiteSpace(row.Apn)) configuredRows.Add(row);
+            }
+
+            if (configuredRows.Count == 0) return configuredRows;
+
+            var matchedRows = new List<ApnInfoRow>();
+            foreach (ApnInfoRow row in configuredRows)
+            {
+                if (ApnLooksRelatedToMbn(row.Apn, activeMbn)) matchedRows.Add(row);
+            }
+
+            return matchedRows.Count > 0 ? matchedRows : configuredRows;
+        }
+
+        private bool ApnLooksRelatedToMbn(string apn, string activeMbn)
+        {
+            string name = (apn ?? "").Trim().ToLowerInvariant();
+            string mbn = (activeMbn ?? "").Trim().ToLowerInvariant();
+            if (name.Length == 0) return false;
+            if (name == "ims") return true;
+            if (mbn.Contains("cu") || mbn.Contains("unicom"))
+            {
+                return name.Contains("3gnet") || name.Contains("wonet") || name.Contains("uninet") || name.Contains("uniwap");
+            }
+            if (mbn.Contains("cmcc") || mbn.Contains("mobile"))
+            {
+                return name.Contains("cmnet") || name.Contains("cmwap");
+            }
+            if (mbn.Contains("ct") || mbn.Contains("telecom"))
+            {
+                return name.Contains("ctnet") || name.Contains("ctlte") || name.Contains("ctwap");
+            }
+            return false;
+        }
+
+        private void ParseQicsgpRows(string text, SortedDictionary<int, ApnInfoRow> byCid)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return;
+
+            int commandCid = 0;
+            foreach (string rawLine in text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string line = rawLine.Trim();
+                Match commandMatch = Regex.Match(line, @"AT\+QICSGP=(\d+)", RegexOptions.IgnoreCase);
+                if (commandMatch.Success)
+                {
+                    int.TryParse(commandMatch.Groups[1].Value, out commandCid);
+                    continue;
+                }
+
+                Match responseMatch = Regex.Match(line, @"\+QICSGP:\s*(.+)", RegexOptions.IgnoreCase);
+                if (!responseMatch.Success) continue;
+
+                List<string> fields = SplitAtFields(responseMatch.Groups[1].Value);
+                if (fields.Count == 0) continue;
+
+                int cid = commandCid;
+                int typeIndex = 0;
+                int apnIndex = 1;
+
+                if (cid <= 0 && fields.Count >= 3)
+                {
+                    int.TryParse(fields[0], out cid);
+                    typeIndex = 1;
+                    apnIndex = 2;
+                }
+
+                if (cid <= 0) continue;
+
+                var row = GetOrCreateApnRow(byCid, cid);
+                if (fields.Count > typeIndex && string.IsNullOrWhiteSpace(row.PdpType))
+                {
+                    row.PdpType = QicsgpContextTypeToText(fields[typeIndex]);
+                }
+                if (fields.Count > apnIndex && string.IsNullOrWhiteSpace(row.Apn))
+                {
+                    row.Apn = fields[apnIndex];
+                }
+            }
+        }
+
+        private List<string> SplitAtFields(string text)
+        {
+            var fields = new List<string>();
+            foreach (Match match in Regex.Matches(text ?? "", @"""([^""]*)""|([^,]+)"))
+            {
+                if (match.Groups[1].Success) fields.Add(match.Groups[1].Value);
+                else fields.Add(match.Groups[2].Value.Trim());
+            }
+            return fields;
+        }
+
+        private ApnInfoRow GetOrCreateApnRow(SortedDictionary<int, ApnInfoRow> rows, int cid)
+        {
+            ApnInfoRow row;
+            if (!rows.TryGetValue(cid, out row))
+            {
+                row = new ApnInfoRow { Cid = cid, PdpType = "", Apn = "" };
+                rows.Add(cid, row);
+            }
+            return row;
+        }
+
+        private void ApplyApnState(ApnInfoRow row, HashSet<int> activeCids, bool apnActivationKnown)
+        {
+            if (!apnActivationKnown)
+            {
+                row.State = 1;
+                row.StateText = "未知";
+            }
+            else if (activeCids.Contains(row.Cid))
+            {
+                row.State = 2;
+                row.StateText = "激活";
+            }
+            else
+            {
+                row.State = 0;
+                row.StateText = "未激活";
+            }
+        }
+
+        private string QicsgpContextTypeToText(string value)
+        {
+            if (value == "1") return "IPV4";
+            if (value == "2") return "IPV6";
+            if (value == "3") return "IPV4V6";
+            return value;
         }
 
         private List<MbnInfoRow> ParseMbnRows(string text)
@@ -1267,6 +1599,7 @@ namespace Ec20PhoneTool
             dataDir = LoadConfiguredDataDir();
             UpdateDataPaths();
             Directory.CreateDirectory(dataDir);
+            MigrateKnownDataDirectories();
             LoadSettings();
             LoadSmsRecords();
             LoadCallRecords();
@@ -1282,6 +1615,22 @@ namespace Ec20PhoneTool
                 {
                     string value = key == null ? "" : Convert.ToString(key.GetValue("DataDir"));
                     if (!string.IsNullOrWhiteSpace(value)) return value;
+                }
+            }
+            catch
+            {
+            }
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(LegacyEnglishAppRegistryKey, false))
+                {
+                    string value = key == null ? "" : Convert.ToString(key.GetValue("DataDir"));
+                    if (!string.IsNullOrWhiteSpace(value))
+                    {
+                        dataDir = value;
+                        SaveConfiguredDataDir();
+                        return value;
+                    }
                 }
             }
             catch
@@ -1315,9 +1664,120 @@ namespace Ec20PhoneTool
                     key.SetValue("DataDir", dataDir);
                 }
                 Registry.CurrentUser.DeleteSubKeyTree(LegacyAppRegistryKey, false);
+                Registry.CurrentUser.DeleteSubKeyTree(LegacyEnglishAppRegistryKey, false);
             }
             catch
             {
+            }
+        }
+
+        private void MigrateKnownDataDirectories()
+        {
+            foreach (string oldDir in GetLegacyDataDirectories())
+            {
+                if (string.IsNullOrWhiteSpace(oldDir)) continue;
+                if (!Directory.Exists(oldDir)) continue;
+                if (PathsEqual(oldDir, dataDir)) continue;
+
+                MoveDirectoryContents(oldDir, dataDir);
+                ReplaceDirectoryWithShortcut(oldDir, dataDir);
+            }
+        }
+
+        private List<string> GetLegacyDataDirectories()
+        {
+            var dirs = new List<string>();
+            AddUnique(dirs, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), LegacyDataDirName));
+            AddUnique(dirs, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), LegacyDataDirName));
+            string oneDrive = Environment.GetEnvironmentVariable("OneDrive");
+            if (!string.IsNullOrWhiteSpace(oneDrive))
+            {
+                AddUnique(dirs, Path.Combine(oneDrive, "文档", LegacyDataDirName));
+                AddUnique(dirs, Path.Combine(oneDrive, "Documents", LegacyDataDirName));
+            }
+            return dirs;
+        }
+
+        private void MoveDirectoryContents(string sourceDir, string targetDir)
+        {
+            try
+            {
+                Directory.CreateDirectory(targetDir);
+                foreach (string sourceFile in Directory.GetFiles(sourceDir))
+                {
+                    string targetFile = Path.Combine(targetDir, Path.GetFileName(sourceFile));
+                    if (!File.Exists(targetFile)) File.Move(sourceFile, targetFile);
+                }
+                foreach (string sourceSubDir in Directory.GetDirectories(sourceDir))
+                {
+                    string targetSubDir = Path.Combine(targetDir, Path.GetFileName(sourceSubDir));
+                    if (!Directory.Exists(targetSubDir)) Directory.Move(sourceSubDir, targetSubDir);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void ReplaceDirectoryWithShortcut(string oldDir, string targetDir)
+        {
+            try
+            {
+                if (!Directory.Exists(oldDir) || !DirectoryIsEmpty(oldDir)) return;
+                string parent = Path.GetDirectoryName(oldDir);
+                string name = Path.GetFileName(oldDir);
+                if (string.IsNullOrEmpty(parent) || string.IsNullOrEmpty(name)) return;
+
+                Directory.Delete(oldDir, false);
+                CreateShortcut(Path.Combine(parent, name + ".lnk"), targetDir, "EC20-CE-FAG-Tools 数据目录");
+            }
+            catch
+            {
+            }
+        }
+
+        private bool DirectoryIsEmpty(string dir)
+        {
+            try
+            {
+                return Directory.GetFiles(dir).Length == 0 && Directory.GetDirectories(dir).Length == 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void CreateShortcut(string shortcutPath, string targetPath, string description)
+        {
+            try
+            {
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                if (shellType == null) return;
+                object shell = Activator.CreateInstance(shellType);
+                object shortcut = shellType.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { shortcutPath });
+                Type shortcutType = shortcut.GetType();
+                shortcutType.InvokeMember("TargetPath", System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { targetPath });
+                shortcutType.InvokeMember("WorkingDirectory", System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { targetPath });
+                shortcutType.InvokeMember("Description", System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { description });
+                shortcutType.InvokeMember("Save", System.Reflection.BindingFlags.InvokeMethod, null, shortcut, null);
+            }
+            catch
+            {
+            }
+        }
+
+        private bool PathsEqual(string left, string right)
+        {
+            try
+            {
+                string a = Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string b = Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
             }
         }
 
@@ -3098,13 +3558,39 @@ namespace Ec20PhoneTool
             startupButton.Text = IsStartupEnabled() ? "开机自启：已开启" : "开机自启：已关闭";
         }
 
+        private void MigrateStartupRegistration()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
+                {
+                    if (key == null) return;
+                    string currentValue = Convert.ToString(key.GetValue(StartupRunName));
+                    string legacyEnglishValue = Convert.ToString(key.GetValue(LegacyEnglishStartupRunName));
+                    string legacyValue = Convert.ToString(key.GetValue(LegacyStartupRunName));
+                    bool enabled = !string.IsNullOrWhiteSpace(currentValue)
+                        || !string.IsNullOrWhiteSpace(legacyEnglishValue)
+                        || !string.IsNullOrWhiteSpace(legacyValue);
+                    if (!enabled) return;
+
+                    key.SetValue(StartupRunName, "\"" + Application.ExecutablePath + "\" /background");
+                    key.DeleteValue(LegacyEnglishStartupRunName, false);
+                    key.DeleteValue(LegacyStartupRunName, false);
+                }
+            }
+            catch
+            {
+            }
+        }
+
         private bool IsStartupEnabled()
         {
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", false))
             {
                 string value = key == null ? "" : Convert.ToString(key.GetValue(StartupRunName));
+                string legacyEnglishValue = key == null ? "" : Convert.ToString(key.GetValue(LegacyEnglishStartupRunName));
                 string legacyValue = key == null ? "" : Convert.ToString(key.GetValue(LegacyStartupRunName));
-                return !string.IsNullOrEmpty(value) || !string.IsNullOrEmpty(legacyValue);
+                return !string.IsNullOrEmpty(value) || !string.IsNullOrEmpty(legacyEnglishValue) || !string.IsNullOrEmpty(legacyValue);
             }
         }
 
@@ -3115,6 +3601,7 @@ namespace Ec20PhoneTool
             using (RegistryKey key = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
             {
                 key.SetValue(StartupRunName, value);
+                key.DeleteValue(LegacyEnglishStartupRunName, false);
                 key.DeleteValue(LegacyStartupRunName, false);
             }
         }
@@ -3124,6 +3611,7 @@ namespace Ec20PhoneTool
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
             {
                 if (key != null) key.DeleteValue(StartupRunName, false);
+                if (key != null) key.DeleteValue(LegacyEnglishStartupRunName, false);
                 if (key != null) key.DeleteValue(LegacyStartupRunName, false);
             }
         }
